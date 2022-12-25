@@ -417,9 +417,11 @@ dependencies = [
  "aes-gcm",
  "bytecheck",
  "flate2",
+ "generic-array",
  "rkyv",
  "rpassword",
  "sha2",
+ "typenum",
 ]
 
 [[package]]

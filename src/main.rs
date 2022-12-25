@@ -1,22 +1,32 @@
 use std::{
     io::{Write, Read},
-    fs::{File, OpenOptions},
+    fs::{
+        File,
+        OpenOptions
+    },
     os::windows::prelude::FileExt,
     error::Error,
-    collections::HashMap,
+    collections::{
+        HashMap,
+        BTreeMap,
+        hash_map::Entry as HashMapEntry
+    },
+    cmp::Ordering,
+    path::{
+        PathBuf,
+        Path,
+        Component
+    }
 };
 
 use aes_gcm::{
-    aead::{KeyInit, generic_array::GenericArray},
+    aead::{
+        Aead,
+        KeyInit
+    },
     Aes256Gcm,
     AesGcm,
-    aes::Aes256
-};
-
-use sha2::{
-    Sha256,
-    Digest,
-    digest::typenum::{UInt, UTerm, B0, B1}
+    aes::Aes256, Nonce
 };
 
 use rkyv::{
@@ -25,58 +35,111 @@ use rkyv::{
     Serialize,
     AlignedVec
 };
+
+use sha2::{
+    Sha256,
+    Digest
+};
+
+use generic_array::GenericArray;
+use typenum::{U12, U32};
 use bytecheck::CheckBytes;
 
 macro_rules! scan {
-    () => {{
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line)?;
-        line
-    }};
-
     ($var:expr) => {{
         print!("{}", $var);
-        match std::io::stdout().flush() {
-            Ok(_) => {},
-            Err(err) => panic!("{}", err)
+        if let Err(err) = std::io::stdout().flush() {
+            panic!("{err}");
         };
         let mut line = String::new();
-        std::io::stdin().read_line(&mut line)?;
+        std::io::stdin().read_line(&mut line).unwrap();
         line
     }}
 }
 
-#[derive(Archive, Serialize, Deserialize, Debug, Clone, Copy)]
+#[derive(Archive, Serialize, Deserialize, Clone)]
 #[archive_attr(derive(CheckBytes))]
 struct VfsFile {
     offset: u32,
-    length: u32
+    length: usize
 }
 
-#[derive(Archive, Serialize, Deserialize, Debug)]
+#[derive(Archive, Serialize, Deserialize, Clone)]
 #[archive_attr(derive(CheckBytes))]
+enum Entry {
+    File(VfsFile),
+    Directory(VfsDirectory)
+}
+
+#[derive(Archive, Serialize, Deserialize, Clone)]
+#[archive(
+    bound(
+        serialize = "__S: rkyv::ser::ScratchSpace + rkyv::ser::Serializer"
+    )
+)]
+#[archive_attr(
+    derive(CheckBytes),
+    check_bytes(
+        bound = "__C: rkyv::validation::ArchiveContext, <__C as rkyv::Fallible>::Error: std::error::Error"
+    )
+)]
+struct VfsDirectory {
+    #[omit_bounds]
+    #[archive_attr(omit_bounds)]
+    entries: HashMap<String, Entry>
+}
+
+#[derive(Archive, Serialize, Deserialize)]
+#[archive(
+    bound(
+        serialize = "__S: rkyv::ser::ScratchSpace + rkyv::ser::Serializer"
+    )
+)]
+#[archive_attr(
+    derive(CheckBytes),
+    check_bytes(
+        bound = "__C: rkyv::validation::ArchiveContext, <__C as rkyv::Fallible>::Error: std::error::Error"
+    )
+)]
 struct Root {
     cur_offset: u32,
-    files: Vec<(String, VfsFile)>,
+    #[omit_bounds]
+    #[archive_attr(omit_bounds)]
+    entries: HashMap<String, Entry>,
+    free: BTreeMap<usize, u32>
+}
+
+struct Vfs {
+    oracle: AesGcm<Aes256, U12>,
+    root: Root,
+    file: File,
+    cur_directory: PathBuf
 }
 
 #[derive(PartialEq, Eq)]
-struct Commands(u8);
+enum Commands {
+    EXIT,
+    TOUCH,
+    CAT,
+    NANO,
+    CP,
+    MV,
+    RM,
+    LS,
+    RESET,
+    CD,
+    MKDIR,
+    PWD,
+    RMDIR,
+    IMPORT,
+    EXPORT,
+    DEFRAG,
+    INVALID,
+}
 
-impl Commands {
-    const EXIT: Self = Self(0);
-    const TOUCH: Self = Self(1);
-    const CAT: Self = Self(2);
-    const NANO: Self = Self(3);
-    const CP: Self = Self(4);
-    const MV: Self = Self(5);
-    const RM: Self = Self(6);
-    const LS: Self = Self(7);
-    const RESET: Self = Self(8);
-    const INVALID: Self = Self(255);
-
-    fn to_command(cmd: &str) -> Self {
-        match cmd {
+impl From<String> for Commands {
+    fn from(cmd: String) -> Self {
+        match cmd.as_str() {
             "exit" | "ext" => Commands::EXIT,
             "touch" | "tch" => Commands::TOUCH,
             "cat" => Commands::CAT,
@@ -86,17 +149,42 @@ impl Commands {
             "rm" => Commands::RM,
             "ls" => Commands::LS,
             "reset" |"rst" => Commands::RESET,
+            "cd" => Commands::CD,
+            "mkdir" => Commands::MKDIR,
+            "pwd" => Commands::PWD,
+            "rmdir" => Commands::RMDIR,
+            "import" | "imp" => Commands::IMPORT,
+            "export" | "exp" => Commands::EXPORT,
+            "defrag" | "dfrg" => Commands::DEFRAG,
             _ => Commands::INVALID
         }
     }
 }
 
 impl VfsFile {
-    fn new(offset: u32, size: usize) -> Self {
+    fn new(offset: u32, length: usize) -> Self {
         Self {
             offset,
-            length: size as u32
+            length
         }
+    }
+}
+
+impl Default for VfsFile {
+    fn default() -> Self {
+        Self::new(0, 0)
+    }
+}
+
+impl VfsDirectory {
+    fn new(entries: HashMap<String, Entry>) -> Self {
+        Self { entries }
+    }
+}
+
+impl Default for VfsDirectory {
+    fn default() -> Self {
+        Self::new(HashMap::new())
     }
 }
 
@@ -104,20 +192,16 @@ impl Default for Root {
     fn default() -> Self {
         Root {
             cur_offset: 0,
-            files: Vec::new()
+            entries: HashMap::from([
+                ("\\".to_string(), Entry::Directory(VfsDirectory::default()))
+            ]),
+            free: BTreeMap::new()
         }
     }
 }
 
-struct Vfs {
-    #[allow(dead_code)]
-    key: AesGcm<Aes256, UInt<UInt<UInt<UInt<UTerm, B1>, B1>, B0>, B0>>,
-    root: Root,
-    file: File,
-    registry: HashMap<String, usize>
-}
-
-fn get_key() -> GenericArray<u8, UInt<UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>, B0>> {
+#[inline]
+fn get_key() -> GenericArray<u8, U32> {
     let key = rpassword::prompt_password("Your key: ").unwrap();
     let mut hasher = Sha256::new();
     hasher.update(key.as_bytes());
@@ -127,24 +211,137 @@ fn get_key() -> GenericArray<u8, UInt<UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, 
     return cipher_key;
 }
 
+#[inline(always)]
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut components = path.components().peekable();
+    let mut ret = if let Some(c @ Component::Prefix(..)) = components.peek().cloned() {
+        components.next();
+        PathBuf::from(c.as_os_str())
+    } else {
+        PathBuf::new()
+    };
+
+    for component in components {
+        match component {
+            Component::Prefix(..) => unreachable!(),
+            Component::RootDir => {
+                ret.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                ret.pop();
+            }
+            Component::Normal(c) => {
+                ret.push(c);
+            }
+        }
+    }
+    ret
+}
+
+enum Action {
+    Create(Entry),
+    Delete,
+    Update(Entry)
+}
+
 impl Vfs {
     fn new(path: String) -> Self {
         let cipher = Aes256Gcm::new(GenericArray::from_slice(get_key().as_slice()));
         Vfs {
             root: Root::default(),
             file: OpenOptions::new().write(true).read(true).create(true).open(path).unwrap(),
-            key: cipher,
-            registry: HashMap::new()
+            oracle: cipher,
+            cur_directory: Path::new(r"\").join("")
         }
+    }
+
+    fn get_path(&self, cur_path: String) -> Result<Entry, Box<dyn Error>> {
+        let path = self.make_path(cur_path);
+        let mut entry = self.root.entries[&path[0]].clone();
+        for part in &path[1..] {
+            match entry {
+                Entry::Directory(dir) => {
+                    entry = match dir.entries.get(part) {
+                        Some(e) => e.clone(),
+                        None => return Err(format!("Directory `{part}` not found.").into()),
+                    }
+                },
+
+                Entry::File(_) => return Err(format!("`{part}` is not a directory").into())
+            }
+        }
+
+        Ok(entry)
+    }
+
+    fn set_path(&mut self, cur_path: String, action: Action) -> Result<(), Box<dyn Error>> {
+        let path = self.make_path(cur_path);
+        let mut entry = self.root.entries.entry(path[0].clone()).or_insert(
+            Entry::Directory(
+                VfsDirectory::default()
+            )
+        );
+
+        let (last, parts) = path[1..].split_last().unwrap();
+        for part in parts {
+            match entry {
+                Entry::Directory(dir) => {
+                    entry = match dir.entries.entry(part.clone()) {
+                        HashMapEntry::Occupied(entry) => {
+                            HashMapEntry::Occupied(entry).or_insert(
+                                Entry::Directory(
+                                    VfsDirectory::default()
+                                )
+                            )
+                        },
+
+                        HashMapEntry::Vacant(_) => return Err(format!("Directory `{part}` not found.").into()),
+                    }
+                },
+
+                Entry::File(_) => return Err(format!("`{part}` is not a directory").into())
+            }
+        }
+
+        match action {
+            Action::Create(action_entry) => {
+                if let Entry::Directory(dir) = entry {
+                    match dir.entries.entry(last.clone()) {
+                        HashMapEntry::Occupied(_) => return Err("File already exists.".into()),
+                        HashMapEntry::Vacant(entry) => entry.insert(action_entry)
+                    };
+                }
+            },
+
+            Action::Delete => {
+                if let Entry::Directory(dir) = entry {
+                    match dir.entries.entry(last.clone()) {
+                        HashMapEntry::Occupied( entry) => entry.remove(),
+                        HashMapEntry::Vacant(_) => return Err("File doesn't exist.".into())
+                    };
+                }
+            },
+
+            Action::Update(action_entry) => {
+                if let Entry::Directory(dir) = entry {
+                    match dir.entries.entry(last.clone()) {
+                        HashMapEntry::Occupied(mut entry) => entry.insert(action_entry),
+                        HashMapEntry::Vacant(_) => return Err("File doesn't exist.".into())
+                    };
+                }
+            }
+        }
+        Ok(())
     }
 
     fn init(&mut self) -> Result<(), Box<dyn Error>> {
         let mut meta_len_bytes= [0; 4];
-        self.file.read_exact(&mut meta_len_bytes)?;
+        self.read_file(&mut meta_len_bytes, 0)?;
         let meta_len = u32::from_ne_bytes(meta_len_bytes);
 
-        let mut buf = [0; HEADER_SIZE];
-        self.file.seek_read(&mut buf, 4)?;
+        let mut buf = [0; HEADER_SIZE as usize];
+        self.read_file(&mut buf, 4)?;
 
         if meta_len == 0 {
             self.root = Root::default();
@@ -156,27 +353,323 @@ impl Vfs {
 
         self.root = rkyv::from_bytes::<Root>(&aligned_vec)?;
 
-        for (pos, entry) in self.root.files.iter().enumerate() {
-            self.registry.insert(entry.0.clone(), pos);
-        }
+        Ok(())
+    }
 
-        println!("{:#?}", self.registry);
+    fn make_path(&self, path: String) -> Vec<String> {
+        normalize_path(self.cur_directory.join(path).as_path())
+            .iter()
+            .map(|part| part.to_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn write_file(&self, buf: &[u8], offset: u64) -> Result<(), Box<dyn Error>> {
+        let nonce = Nonce::from_slice(b"");
+        let encrypted_buf = match self.oracle.encrypt(nonce, buf) {
+            Ok(v) => v,
+            Err(e) => return Err(format!("Error occured while encryption: {e}").into())
+        };
+        self.file.seek_write(&encrypted_buf, offset)?;
 
         Ok(())
     }
 
-    fn exit(&mut self) -> Result<(), Box<dyn Error>> {
-        let bytes = rkyv::to_bytes::<_, HEADER_SIZE>(&self.root)?;
-        self.file.seek_write(&(bytes.len() as u32).to_ne_bytes(), 0)?;
-        self.file.seek_write(&bytes, 4)?;
+    fn read_file(&self, buf: &mut [u8], offset: u64) -> Result<(), Box<dyn Error>> {
+        let decrypted_buf: &mut Vec<u8> = &mut vec![0; buf.len()];
+        self.file.seek_read(decrypted_buf, offset)?;
+
+        buf.copy_from_slice(decrypted_buf.as_slice());
+
+        Ok(())
+    }
+}
+
+impl Vfs {
+    fn exit(&self) -> Result<(), Box<dyn Error>> {
+        const SIZE: usize = HEADER_SIZE as usize;
+        let bytes = rkyv::to_bytes::<_, SIZE>(&self.root)?;
+        self.write_file(&(bytes.len() as u32).to_ne_bytes(), 0)?;
+        self.write_file(&bytes, 4)?;
 
         Ok(())
     }
 
-    fn touch(&mut self, name: String) -> Result<(), Box<dyn Error>> {
-        if self.registry.get(&name).is_some() {
-            return Err("File already exists".into());
+    fn touch(&mut self, path: String) -> Result<(), Box<dyn Error>> {
+        let mut text = String::new();
+        let mut line: String = scan!(".. ");
+
+        while !line.ends_with("<< EOF") {
+            text.push_str(line.as_str());
+            line = scan!(".. ");
         }
+
+        text.push_str(&line[..(line.len() - 6)]);
+
+        match self.root.free.iter().position(|(&len, _)| text.len() <= len) {
+            Some(key) => {
+                let offset = self.root.free.remove(&key).unwrap();
+                self.write_file(&text.as_bytes(), offset as u64 + HEADER_SIZE + 4)?;
+
+                self.set_path(
+                    path,
+                    Action::Create(
+                        Entry::File(
+                            VfsFile::new(offset, text.len())
+                        )
+                    )
+                )?;
+
+                if text.len() < key {
+                    self.root.free.insert(key - text.len(), offset + text.len() as u32);
+                }
+            },
+
+            None => {
+                self.write_file(&text.as_bytes(), self.root.cur_offset as u64 + HEADER_SIZE + 4)?;
+
+                self.set_path(
+                    path,
+                    Action::Create(
+                        Entry::File(
+                            VfsFile::new(
+                                self.root.cur_offset,
+                                text.len()
+                            )
+                        )
+                    )
+                )?;
+                self.root.cur_offset += text.len() as u32;
+            }
+        };
+
+        Ok(())
+    }
+
+    fn cat(&self, path: String) -> Result<(), Box<dyn Error>> {
+        let entry = self.get_path(path.clone())?;
+
+        if let Entry::File(file) = entry {
+            let mut buf = vec![0; file.length];
+            self.read_file(&mut buf, (file.offset as u64) + HEADER_SIZE + 4)?;
+            print!("{}", String::from_utf8(buf)?);
+        } else {
+            return Err(format!("{path} is not a file").into());
+        }
+
+        Ok(())
+    }
+
+    fn cp(&mut self, from: String, to: String) -> Result<(), Box<dyn Error>> {
+        let file = match self.get_path(from.clone())? {
+            Entry::File(file) => file,
+            Entry::Directory(_) => return Err(format!("`{from}` is not a file.").into())
+        };
+
+        let mut buf = vec![0; file.length];
+
+        self.read_file(&mut buf, (file.offset as u64) + HEADER_SIZE + 4)?;
+
+        match self.root.free.iter().position(|(&len, _)| file.length <= len) {
+            Some(len) => {
+                let offset = self.root.free.remove(&len).unwrap();
+                self.write_file(&buf.as_slice(), offset as u64 + HEADER_SIZE + 4)?;
+
+                self.set_path(
+                    to,
+                    Action::Create(
+                        Entry::File(
+                            VfsFile::new(offset, file.length)
+                        )
+                    )
+                )?;
+
+                if file.length < len {
+                    self.root.free.insert(len - file.length, offset + file.length as u32);
+                }
+            },
+
+            None => {
+                self.write_file(buf.as_slice(), (self.root.cur_offset as u64) + 4 + HEADER_SIZE)?;
+
+                self.set_path(
+                    to,
+                    Action::Create(
+                        Entry::File(
+                            VfsFile::new(self.root.cur_offset, file.length)
+                        )
+                    )
+                )?;
+
+                self.root.cur_offset += file.offset;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn mv(&mut self, from: String, to: String) -> Result<(), Box<dyn Error>> {
+        let file = match self.get_path(to)? {
+            Entry::File(file) => file,
+            Entry::Directory(_) => return Err("`mv` for directories are not currently implemented".into())
+        };
+
+        self.set_path(from, Action::Update(Entry::File(file)))
+    }
+
+    fn rm(&mut self, path: String) -> Result<(), Box<dyn Error>> {
+        let file = match self.get_path(path.clone())? {
+            Entry::File(file) => file,
+            Entry::Directory(_) => return Err(format!("`{path}` is not a file. use `rmdir` instead.").into())
+        };
+
+        let mut buf = vec![0; file.length];
+        self.write_file(&mut buf, (file.offset as u64) + HEADER_SIZE + 4)?;
+
+        self.set_path(path, Action::Delete)
+    }
+
+    fn ls(&self) -> Result<(), Box<dyn Error>> {
+        let directory = match self.get_path("./".to_string())? {
+            Entry::Directory(dir) => dir,
+            Entry::File(_) => return Err(format!("Working directory is not a file").into())
+        };
+
+        let max = match directory.entries.keys().map(String::len).max() {
+            Some(max) if max > 4 => max,
+            _ => 4
+        };
+
+        println!("{:^max$}   {:^max$}   {:^max$}", "Name", "Type", "Size");
+        println!("{0:-<max$}   {0:-<max$}   {0:-<max$}", "");
+
+        for (path, entry) in &directory.entries {
+            match entry {
+                Entry::File(file) => println!("{path:max$}   {:^max$}   {:^max$}", "File", file.length),
+                Entry::Directory(directory) => println!("{path:max$}   {:^max$}   {:^max$}", "Dir", directory.entries.len())
+            }
+        }
+
+        Ok(())
+    }
+
+    fn reset(&mut self) -> Result<(), Box<dyn Error>> {
+        self.root = Root::default();
+
+        self.file.sync_all()?;
+        let len = self.file.metadata()?.len();
+
+        let buf: Vec<u8> = vec![0; len as usize];
+        self.write_file(buf.as_slice(), 0)?;
+
+        Ok(())
+    }
+
+    fn cd(&mut self, path: String) -> Result<(), Box<dyn Error>> {
+        self.get_path(path.clone())?;
+        self.cur_directory = normalize_path(&self.cur_directory.join(path).as_path());
+
+        Ok(())
+    }
+
+    fn mkdir(&mut self, path: String) -> Result<(), Box<dyn Error>> {
+        self.set_path(
+            path,
+            Action::Create(
+                Entry::Directory(
+                    VfsDirectory::default()
+                )
+            )
+        )
+    }
+
+    fn pwd(&self) -> Result<(), Box<dyn Error>> {
+        Ok(println!("{}", self.cur_directory.display()))
+    }
+
+    fn rmdir(&mut self, path: String) -> Result<(), Box<dyn Error>> {
+        let dir = match self.get_path(path.clone())? {
+            Entry::File(_) => return Err(format!("`{path}` is not a directory. use `rm` instead.").into()),
+            Entry::Directory(dir) => dir
+        };
+
+        for (path, entry) in dir.entries {
+            match entry {
+                Entry::File(_) => self.rm(path)?,
+                Entry::Directory(_) => self.rmdir(path)?
+            }
+        }
+
+        self.set_path(path, Action::Delete)
+    }
+
+    fn import(&mut self, from: String, to: String) -> Result<(), Box<dyn Error>> {
+
+        let mut file = File::open(from)?;
+        let text = &mut String::new();
+        file.read_to_string(text)?;
+
+        match self.root.free.iter().position(|(&len, _)| text.len() <= len) {
+            Some(key) => {
+                let offset = self.root.free.remove(&key).unwrap();
+                self.write_file(&text.as_bytes(), offset as u64 + HEADER_SIZE + 4)?;
+
+                self.set_path(
+                    to,
+                    Action::Create(
+                        Entry::File(
+                            VfsFile::new(offset, text.len())
+                        )
+                    )
+                )?;
+
+                if text.len() < key {
+                    self.root.free.insert(key - text.len(), offset + text.len() as u32);
+                }
+            },
+
+            None => {
+                self.write_file(&text.as_bytes(), self.root.cur_offset as u64 + HEADER_SIZE + 4)?;
+
+                self.set_path(
+                    to,
+                    Action::Create(
+                        Entry::File(
+                            VfsFile::new(
+                                self.root.cur_offset,
+                                text.len()
+                            )
+                        )
+                    )
+                )?;
+                self.root.cur_offset += text.len() as u32;
+            }
+        };
+
+        Ok(())
+    }
+
+    fn export(&self, from: String, to: String) -> Result<(), Box<dyn Error>> {
+        let entry = self.get_path(from.clone())?;
+
+        if let Entry::File(vfs_file) = entry {
+            let mut buf = vec![0; vfs_file.length];
+            self.read_file(&mut buf, (vfs_file.offset as u64) + HEADER_SIZE + 4)?;
+
+            let mut file = File::create(to)?;
+            file.write_all(&buf)?;
+        } else {
+            return Err(format!("{from} is not a file").into());
+        }
+
+        Ok(())
+    }
+
+    fn nano(&mut self, path: String) -> Result<(), Box<dyn Error>> {
+        let file = match self.get_path(path.clone())? {
+            Entry::File(file) => file,
+            Entry::Directory(_) => return Err(format!("`{path}` is not a file.").into())
+        };
+
         let mut text = String::new();
         let mut line: String = scan!("... ");
 
@@ -185,186 +678,158 @@ impl Vfs {
             line = scan!("... ");
         }
 
-        self.file.seek_write(&text.as_bytes(), self.root.cur_offset as u64 + HEADER_SIZE as u64 + 4)?;
+        match text.len().cmp(&file.length) {
+            Ordering::Equal => {
+                self.write_file(&text.as_bytes(), file.offset as u64 + HEADER_SIZE + 4)?;
 
-        self.registry.insert(name.clone(), self.root.files.len());
+                self.set_path(
+                    path,
+                    Action::Update(
+                        Entry::File(file.clone())
+                    )
+                )
+            },
 
-        self.root.files.push((name, VfsFile::new(self.root.cur_offset, text.len())));
-        self.root.cur_offset += text.len() as u32;
+            Ordering::Less => {
+                self.write_file(&text.as_bytes(), file.offset as u64 + HEADER_SIZE + 4)?;
 
-        Ok(())
-    }
+                self.set_path(
+                    path,
+                    Action::Update(
+                        Entry::File(
+                            VfsFile::new(file.offset, text.len())
+                        )
+                    )
+                )?;
 
-    fn cat(&self, name: String) -> Result<(), Box<dyn Error>> {
-        let idx = match self.registry.get(&name) {
-            Some(i) => *i,
-            None => return Err("File not found".into())
-        };
+                let mut buf = vec![0; file.length];
+                self.write_file(&mut buf, (file.offset as u64) + HEADER_SIZE + 4)?;
 
-        let file = &self.root.files[idx].1;
-        let mut buf = vec![0; file.length as usize];
+                self.root.free.insert(text.len() - file.length, text.len() as u32);
+                Ok(())
+            },
 
-        self.file.seek_read(&mut buf, (file.offset as u64) + (HEADER_SIZE as u64) + 4)?;
-        print!("{}", String::from_utf8(buf)?);
+            Ordering::Greater => {
+                self.root.free.insert(file.length, file.offset);
 
-        Ok(())
-    }
+                self.write_file(&text.as_bytes(), self.root.cur_offset as u64 + HEADER_SIZE + 4)?;
+                self.root.cur_offset += text.len() as u32;
 
-    fn cp(&mut self, from: String, to: String) -> Result<(), Box<dyn Error>> {
-        let idx = match self.registry.get(&from) {
-            Some(i) => *i,
-            None => return Err("File not found".into())
-        };
-
-        let mut entry = self.root.files[idx].clone();
-        entry.0 = to.clone();
-
-        let file = entry.1;
-        let mut buf = vec![0; file.length as usize];
-
-        self.file.seek_read(&mut buf, (file.offset as u64) + (HEADER_SIZE as u64) + 4)?;
-        self.file.seek_write(buf.as_slice(), (self.root.cur_offset as u64) + 4 + (HEADER_SIZE as u64))?;
-
-        self.registry.insert(to, self.root.files.len());
-
-        self.root.files.push(entry);
-        self.root.cur_offset += file.offset;
-
-        Ok(())
-    }
-
-    fn mv(&mut self, from: String, to: String) -> Result<(), Box<dyn Error>> {
-        let idx = match self.registry.remove(&from) {
-            Some(i) => i,
-            None => return Err("File not found".into())
-        };
-
-        let mut file = self.root.files.remove(idx);
-        file.0 = to.clone();
-        self.root.files.insert(idx, file);
-
-        self.registry.insert(to, idx);
-
-        Ok(())
-    }
-
-    fn rm(&mut self, name: String) -> Result<(), Box<dyn Error>> {
-        let idx = match self.registry.get(&name) {
-            Some(i) => *i,
-            None => return Err("File not found".into())
-        };
-
-        let entry = &self.root.files.remove(idx);
-        let file = entry.1;
-        let mut buf = vec![0; file.length as usize];
-
-        self.file.seek_write(&mut buf, (file.offset as u64) + (HEADER_SIZE as u64) + 4)?;
-
-        self.registry.remove(&name);
-
-        Ok(())
-    }
-
-    fn ls(&self) -> Result<(), Box<dyn Error>> {
-        let max = match self.registry.keys().map(String::len).max() {
-            Some(max) => if max > 4 { max } else { 4 },
-            None => 4
-        };
-
-        println!("{:^max$}  {:^max$}", "Name", "Size");
-        println!("{0:-<max$}  {0:-<max$}", "");
-
-        for (name, file) in &self.root.files {
-            println!("{name:<max$}  {}", file.length);
+                self.set_path(
+                    path,
+                    Action::Update(
+                        Entry::File(
+                            VfsFile::new(
+                                self.root.cur_offset, text.len()
+                            )
+                        )
+                    )
+                )
+            }
         }
-
-        Ok(())
-    }
-
-    fn reset(&mut self) -> Result<(), Box<dyn Error>> {
-        self.registry = HashMap::new();
-        self.root = Root::default();
-
-        self.file.sync_all()?;
-        let len = self.file.metadata()?.len();
-
-        let buf: Vec<u8> = vec![0; len as usize];
-        self.file.seek_write(buf.as_slice(), 0)?;
-
-        Ok(())
     }
 }
 
-const HEADER_SIZE: usize = 524288;
+const HEADER_SIZE: u64 = 524288;
 
-// fn main() {
-fn main() -> Result<(), Box<dyn Error>> {
-    let mut vfs = Vfs::new("path.vfs".to_string());
-    vfs.init()?;
-
-    loop {
-        let cmd = scan!(">>> ");
-        let cmds: Vec<&str> = cmd.trim_end().split(' ').collect();
-        match Commands::to_command(cmds[0]) {
-            Commands::EXIT => {
-                vfs.exit()?;
-                break
-            },
-
-            Commands::TOUCH => {
-                if cmds.len() == 2 {
-                    vfs.touch(cmds[1].to_string())?;
-                } else {
-                    println!("Usage: touch [filename]");
-                }
-            },
-
-            Commands::CAT => {
-                if cmds.len() == 2 {
-                    vfs.cat(cmds[1].to_string())?;
-                } else {
-                    println!("Usage: cat [filename]");
-                }
-            },
-
-            Commands::NANO => {},
-
-            Commands::CP => {
-                if cmds.len() == 3 {
-                    vfs.cp(cmds[1].to_string(), cmds[2].to_string())?;
-                } else {
-                    println!("Usage: cp [from] [to]");
-                }
-            },
-
-            Commands::MV => {
-                if cmds.len() == 3 {
-                    vfs.mv(cmds[1].to_string(), cmds[2].to_string())?;
-                } else {
-                    println!("Usage: mv [from] [to]");
-                }
-            },
-
-            Commands::RM => {
-                if cmds.len() == 2 {
-                    vfs.rm(cmds[1].to_string())?;
-                } else {
-                    println!("Usage: rm [filename]");
-                }
-            },
-
-            Commands::LS => vfs.ls()?,
-            Commands::RESET => vfs.reset()?,
-            Commands::INVALID => println!("Invalid command entered `{}`", cmds[0]),
-            _ => println!("Unknown Error occured")
-        }
+fn get(lst: &Vec<String>, idx: usize) -> String {
+    match lst.get(idx) {
+        Some(s) => s.clone(),
+        None => String::new()
     }
+}
 
-    Ok(())
+fn main() {
+    let mut vfs = Vfs::new("path.vfs".to_string());
+    if let Err(err) = vfs.init() {
+        println!("{err}")
+    };
 
-    // let bytes = rkyv::to_bytes::<_, 1024>(&Root::default()).unwrap();
-    // let buf: [u8; 4] = bytes[..4].try_into().unwrap();
-    // println!("{}, {}, {:?}", bytes.len(), u32::from_ne_bytes(buf), bytes);
-    // let root = rkyv::from_bytes::<Root>(&bytes).unwrap();
-    // println!("{:#?}", root);
+    let err = loop {
+        let cmd = scan!(">> ");
+        let cmds: Vec<String> = cmd.trim_end().split(' ').map(String::from).collect();
+        let res = match Commands::from(get(&cmds, 0)) {
+            Commands::LS => vfs.ls(),
+            Commands::PWD => vfs.pwd(),
+            Commands::RESET => vfs.reset(),
+            Commands::EXIT => break vfs.exit(),
+            Commands::DEFRAG => Err("Not implemented".into()),
+
+            Commands::RM => if cmds.len() == 2 {
+                vfs.rm(get(&cmds, 1))
+            } else {
+                Err(format!("Usage: rm [path]").into())
+            },
+
+            Commands::CD => if cmds.len() == 2 {
+                vfs.cd(get(&cmds, 1))
+            } else {
+                Err(format!("Usage: cd [path]").into())
+            },
+
+            Commands::CAT => if cmds.len() == 2 {
+                vfs.cat(get(&cmds, 1))
+            } else {
+                Err(format!("Usage: cat [path]").into())
+            },
+
+            Commands::NANO => if cmds.len() == 2 {
+                vfs.nano(get(&cmds, 1))
+            } else {
+                Err(format!("Usage: nano [path]").into())
+            },
+
+            Commands::TOUCH => if cmds.len() == 2 {
+                vfs.touch(get(&cmds, 1))
+            } else {
+                Err(format!("Usage: touch [path]").into())
+            },
+
+            Commands::MKDIR => if cmds.len() == 2 {
+                vfs.mkdir(get(&cmds, 1))
+            } else {
+                Err(format!("Usage: mkdir [path]").into())
+            },
+
+            Commands::RMDIR => if cmds.len() == 2 {
+                vfs.rmdir(get(&cmds, 1))
+            } else {
+                Err(format!("Usage: rmdir [path]").into())
+            },
+
+            Commands::CP => if cmds.len() == 3 {
+                vfs.cp(get(&cmds, 1), get(&cmds, 2))
+            } else {
+                Err(format!("Usage: cp [from] [to]").into())
+            },
+
+            Commands::MV => if cmds.len() == 3 {
+                vfs.mv(get(&cmds, 1), get(&cmds, 2))
+            } else {
+                Err(format!("Usage: mv [from] [to]").into())
+            },
+
+            Commands::IMPORT => if cmds.len() == 3 {
+                vfs.import(get(&cmds, 1), get(&cmds, 2))
+            } else {
+                Err(format!("Usage: import [from] [to]").into())
+            },
+
+            Commands::EXPORT => if cmds.len() == 3 {
+                vfs.export(get(&cmds, 1), get(&cmds, 2))
+            } else {
+                Err(format!("Usage: export [from] [to]").into())
+            },
+
+            Commands::INVALID => Ok(println!("Invalid command entered `{}`", cmds[0])),
+        };
+
+        if let Err(err) = res {
+            println!("An error occured:\n\t{err}")
+        }
+    };
+
+    if let Err(err) = err {
+        println!("Error occurred while exiting: {err}\n\tCheck entries before reusing.")
+    }
 }
