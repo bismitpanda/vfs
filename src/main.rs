@@ -740,7 +740,7 @@ fn get(lst: &Vec<String>, idx: usize) -> String {
 }
 
 fn main() {
-    let mut vfs = Vfs::new("path.vfs".to_string());
+    let mut vfs = Vfs::new("test.vfs".to_string());
     if let Err(err) = vfs.init() {
         println!("{err}")
     };
