@@ -10,6 +10,8 @@ aes-gcm = "0.10.1"
 bytecheck = "0.6.9"
 flate2 = "1.0.25"
 generic-array = "0.14.6"
+hex = "0.4.3"
+rand = "0.8.5"
 rkyv = { version = "0.7.39", features = ["validation"] }
 rpassword = "7.2.0"
 sha2 = "0.10.6"
