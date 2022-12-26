@@ -154,7 +154,7 @@ impl From<String> for Commands {
             "mv" => Commands::MV,
             "rm" => Commands::RM,
             "ls" => Commands::LS,
-            "reset" |"rst" => Commands::RESET,
+            "reset" | "rst" | "r" => Commands::RESET,
             "cd" => Commands::CD,
             "mkdir" => Commands::MKDIR,
             "pwd" => Commands::PWD,
@@ -488,7 +488,6 @@ impl Vfs {
         let mut buf = vec![0; file.length];
 
         self.file.seek_read(&mut buf, (file.offset as u64) + HEADER_SIZE + 4)?;
-        let nonce: [u8; 12] = rand::random();
 
         match self.root.free.iter().position(|(&len, _)| file.length <= len) {
             Some(len) => {
@@ -499,7 +498,7 @@ impl Vfs {
                     to,
                     Action::Create(
                         Entry::File(
-                            VfsFile::new(offset, file.length, nonce)
+                            VfsFile::new(offset, file.length, file.nonce)
                         )
                     )
                 )?;
@@ -516,7 +515,7 @@ impl Vfs {
                     to,
                     Action::Create(
                         Entry::File(
-                            VfsFile::new(self.root.cur_offset, file.length, nonce)
+                            VfsFile::new(self.root.cur_offset, file.length, file.nonce)
                         )
                     )
                 )?;
