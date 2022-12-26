@@ -376,17 +376,6 @@ impl Vfs {
             .collect()
     }
 
-    fn write_encrypted(&self, buf: &[u8], offset: u64, nonce: [u8; 12]) -> Result<usize, Box<dyn Error>> {
-        let nonce = Nonce::from_slice(&nonce);
-        let encrypted_buf = match self.oracle.encrypt(&nonce, buf) {
-            Ok(v) => v,
-            Err(_) => return Err("Error occured while encryption".into())
-        };
-        self.file.seek_write(&encrypted_buf, offset + HEADER_SIZE + 4)?;
-
-        Ok(encrypted_buf.len())
-    }
-
     fn encrypt_data(&self, buf: &[u8], nonce: [u8; 12]) -> Result<Vec<u8>, AeadError> {
         self.oracle.encrypt(&Nonce::from_slice(&nonce), buf)
     }
@@ -482,7 +471,7 @@ impl Vfs {
 
         if let Entry::File(file) = entry {
             let buf = self.read_encrypted(file.length, file.offset as u64, file.nonce)?;
-            println!("{}", String::from_utf8(buf)?);// String::from_utf8(buf.clone())?); // TODO: resolve invalid utf-8 sequence error.
+            println!("{}", String::from_utf8(buf)?);
         } else {
             return Err(format!("{path} is not a file").into());
         }
@@ -540,12 +529,13 @@ impl Vfs {
     }
 
     fn mv(&mut self, from: String, to: String) -> Result<(), Box<dyn Error>> {
-        let file = match self.get_path(to)? {
+        let file = match self.get_path(from.clone())? {
             Entry::File(file) => file,
             Entry::Directory(_) => return Err("`mv` for directories are not currently implemented".into())
         };
 
-        self.set_path(from, Action::Update(Entry::File(file)))
+        self.set_path(from, Action::Delete)?;
+        self.set_path(to, Action::Create(Entry::File(file)))
     }
 
     fn rm(&mut self, path: String) -> Result<(), Box<dyn Error>> {
@@ -726,7 +716,7 @@ impl Vfs {
 
         match enc.len().cmp(&file.length) {
             Ordering::Equal => {
-                self.write_encrypted(enc.as_slice(), file.offset as u64, nonce)?; // TODO: handle difference in encrypted bytes length.
+                self.file.seek_write(enc.as_slice(), file.offset as u64 + HEADER_SIZE + 4)?;
 
                 self.set_path(
                     path,
@@ -737,7 +727,7 @@ impl Vfs {
             },
 
             Ordering::Less => {
-                let len = self.write_encrypted(enc.as_slice(), file.offset as u64, nonce)?;
+                let len = self.file.seek_write(enc.as_slice(), file.offset as u64 + HEADER_SIZE + 4)?;
 
                 self.set_path(
                     path,
@@ -758,7 +748,7 @@ impl Vfs {
             Ordering::Greater => {
                 self.root.free.insert(file.length, file.offset);
 
-                let len = self.write_encrypted(enc.as_slice(), self.root.cur_offset as u64, nonce)?;
+                let len = self.file.seek_write(enc.as_slice(), self.root.cur_offset as u64 + HEADER_SIZE + 4)?;
                 self.root.cur_offset += len as u32;
 
                 let empty_bytes = vec![0; file.length];
@@ -831,7 +821,7 @@ Commands:
 
     reset:
         format - reset
-        description - resets the metadata and zeroes all data
+        description - Resets the metadata, zeroes all data and exits.
 
     touch:
         format - touch [file_path]
@@ -858,20 +848,25 @@ Commands:
         format - defrag
         description - Defragments the Vfs and removes the free areas in between.
         note - Currently this feature is not yet implemented.
-               Expected to be implemented by v2.5.0.
+               Expected to be implemented by v2.5.0
+    
+    encrypt:
+        format - encrypt
+        description - A test command to check encryption.
+                      It encrypts using nonce=`unique nonce`.
 "#))
     } 
 
     fn encrypt(&self) -> Result<(), Box<dyn Error>> {
         let text = scan!(".. ");
-        let nonce = Nonce::from_slice(b"unique conce");
+        let nonce = Nonce::from_slice(b"unique nonce");
         let enc = self.oracle.encrypt(&nonce, text.as_bytes()).unwrap();
         Ok(println!("{}", encode(enc)))
     }
 
     fn decrypt(&self) -> Result<(), Box<dyn Error>> {
         let text = scan!(".. ");
-        let nonce = Nonce::from_slice(b"unique conce");
+        let nonce = Nonce::from_slice(b"unique nonce");
         let dec = self.oracle.decrypt(&nonce, decode(text.trim_end())?.as_slice()).unwrap();
         Ok(println!("{}", String::from_utf8(dec)?))
     }
