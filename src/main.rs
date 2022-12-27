@@ -22,8 +22,7 @@ use std::{
 use aes_gcm::{
     aead::{
         Aead,
-        KeyInit,
-        Error as AeadError
+        KeyInit
     },
     Aes256Gcm,
     AesGcm,
@@ -37,15 +36,15 @@ use rkyv::{
     AlignedVec
 };
 
-use sha2::{
-    Sha256,
-    Digest
+use snap::raw::{
+    Decoder,
+    Encoder
 };
 
+use sha2::{Sha256, Digest};
 use generic_array::GenericArray;
 use typenum::{U12, U32};
 use bytecheck::CheckBytes;
-use hex::{encode, decode};
 
 macro_rules! scan {
     ($var:expr) => {{
@@ -64,6 +63,7 @@ macro_rules! scan {
 struct VfsFile {
     offset: u32,
     length: usize,
+    display_length: usize,
     nonce: [u8; 12]
 }
 
@@ -112,8 +112,11 @@ struct Root {
     free: BTreeMap<usize, u32>
 }
 
+#[allow(dead_code)]
 struct Vfs {
     oracle: AesGcm<Aes256, U12>,
+    encoder: Encoder,
+    decoder: Decoder,
     root: Root,
     file: File,
     cur_directory: PathBuf
@@ -138,8 +141,6 @@ enum Commands {
     EXPORT,
     DEFRAG,
     HELP,
-    ENCRYPT,
-    DECRYPT,
     INVALID,
 }
 
@@ -163,26 +164,19 @@ impl From<String> for Commands {
             "export" | "exp" => Commands::EXPORT,
             "defrag" | "dfrg" => Commands::DEFRAG,
             "help" | "hlp" | "h" => Commands::HELP,
-            "encrypt" | "enc" => Commands::ENCRYPT,
-            "decrypt" | "dec" => Commands::DECRYPT,
             _ => Commands::INVALID
         }
     }
 }
 
 impl VfsFile {
-    fn new(offset: u32, length: usize, nonce: [u8; 12]) -> Self {
+    fn new(offset: u32, length: usize, nonce: [u8; 12], display_length: usize) -> Self {
         Self {
             offset,
             length,
+            display_length,
             nonce
         }
-    }
-}
-
-impl Default for VfsFile {
-    fn default() -> Self {
-        Self::new(0, 0, [0; 12])
     }
 }
 
@@ -190,9 +184,7 @@ impl VfsDirectory {
     fn new(entries: HashMap<String, Entry>) -> Self {
         Self { entries }
     }
-}
 
-impl Default for VfsDirectory {
     fn default() -> Self {
         Self::new(HashMap::new())
     }
@@ -210,7 +202,6 @@ impl Default for Root {
     }
 }
 
-#[inline]
 fn get_key() -> GenericArray<u8, U32> {
     let key = rpassword::prompt_password("Your key: ").unwrap();
     let mut hasher = Sha256::new();
@@ -221,7 +212,6 @@ fn get_key() -> GenericArray<u8, U32> {
     return cipher_key;
 }
 
-#[inline(always)]
 fn normalize_path(path: &Path) -> PathBuf {
     let mut components = path.components().peekable();
     let mut ret = if let Some(c @ Component::Prefix(..)) = components.peek().cloned() {
@@ -259,10 +249,12 @@ impl Vfs {
     fn new(path: String) -> Self {
         let cipher = Aes256Gcm::new(GenericArray::from_slice(get_key().as_slice()));
         Vfs {
-            root: Root::default(),
-            file: OpenOptions::new().write(true).read(true).create(true).open(path).unwrap(),
             oracle: cipher,
-            cur_directory: Path::new(r"\").join("")
+            root: Root::default(),
+            encoder: Encoder::new(),
+            decoder: Decoder::new(),
+            cur_directory: Path::new(r"\").join(""),
+            file: OpenOptions::new().write(true).read(true).create(true).open(path).unwrap()
         }
     }
 
@@ -350,13 +342,12 @@ impl Vfs {
         self.file.seek_read(&mut meta_len_bytes, 0)?;
         let meta_len = u32::from_ne_bytes(meta_len_bytes);
 
-        let mut buf = [0; HEADER_SIZE as usize];
-        self.file.seek_read(&mut buf, 4)?;
-
         if meta_len == 0 {
             self.root = Root::default();
             return Ok(());
         }
+
+        let buf = self.read_encrypted(meta_len as usize, 4, *b"secure nonce")?;
 
         let mut aligned_vec = AlignedVec::new();
         aligned_vec.extend_from_slice(&buf[..(meta_len as usize)]);
@@ -376,19 +367,29 @@ impl Vfs {
             .collect()
     }
 
-    fn encrypt_data(&self, buf: &[u8], nonce: [u8; 12]) -> Result<Vec<u8>, AeadError> {
-        self.oracle.encrypt(&Nonce::from_slice(&nonce), buf)
+    fn encrypt(&mut self, buf: &[u8], nonce: [u8; 12]) -> Result<Vec<u8>, Box<dyn Error>> {
+        match self.oracle.encrypt(&Nonce::from_slice(&nonce), buf) {
+            Ok(v) => {
+                self.compress(v.as_slice())
+            },
+            Err(_) => Err("Error occured during encryption.".into())
+        }
     }
 
-    fn read_encrypted(&self, length: usize, offset: u64, nonce: [u8; 12]) -> Result<Vec<u8>, Box<dyn Error>> {
+    fn compress(&mut self, buf: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
+        let compressed = self.encoder.compress_vec(buf)?;
+        Ok(compressed)
+    }
+
+    fn read_encrypted(&mut self, length: usize, offset: u64, nonce: [u8; 12]) -> Result<Vec<u8>, Box<dyn Error>> {
         let new_buf: &mut Vec<u8> = &mut vec![0; length];
         self.file.seek_read(new_buf, offset + HEADER_SIZE + 4)?;
 
         let nonce = Nonce::from_slice(&nonce);
 
-        let decrypted_buf = match self.oracle.decrypt(&nonce, new_buf.as_ref()) {
+        let decrypted_buf = match self.oracle.decrypt(&nonce, self.decoder.decompress_vec(new_buf.as_slice())?.as_ref()) {
             Ok(v) => v,
-            Err(_) => return Err("Error occured while decryption".into())
+            Err(_) => return Err("Error occured during decryption".into())
         };
 
         Ok(decrypted_buf)
@@ -396,11 +397,12 @@ impl Vfs {
 }
 
 impl Vfs {
-    fn exit(&self) -> Result<(), Box<dyn Error>> {
+    fn exit(&mut self) -> Result<(), Box<dyn Error>> {
         const SIZE: usize = HEADER_SIZE as usize;
         let bytes = rkyv::to_bytes::<_, SIZE>(&self.root)?;
-        self.file.seek_write(&(bytes.len() as u32).to_ne_bytes(), 0)?;
-        self.file.seek_write(&bytes, 4)?;
+        let enc_bytes = self.encrypt(bytes.as_slice(), *b"secure nonce")?;
+        let len = self.file.seek_write(&enc_bytes, 4)?;
+        self.file.seek_write(&(len as u32).to_ne_bytes(), 0)?;
 
         Ok(())
     }
@@ -420,10 +422,7 @@ impl Vfs {
 
         let nonce: [u8; 12] = rand::random();
 
-        let enc = match self.encrypt_data(text.as_bytes(), nonce) {
-            Ok(v) => v,
-            Err(_) => return Err("Error occured while encryption.".into())
-        };
+        let enc = self.encrypt(text.as_bytes(), nonce)?;
 
         match self.root.free.iter().position(|(&len, _)| enc.len() <= len) {
             Some(key) => {
@@ -434,7 +433,7 @@ impl Vfs {
                     path,
                     Action::Create(
                         Entry::File(
-                            VfsFile::new(offset, len, nonce)
+                            VfsFile::new(offset, len, nonce, text.len())
                         )
                     )
                 )?;
@@ -454,7 +453,8 @@ impl Vfs {
                             VfsFile::new(
                                 self.root.cur_offset,
                                 len,
-                                nonce
+                                nonce,
+                                text.len()
                             )
                         )
                     )
@@ -466,7 +466,7 @@ impl Vfs {
         Ok(())
     }
 
-    fn cat(&self, path: String) -> Result<(), Box<dyn Error>> {
+    fn cat(&mut self, path: String) -> Result<(), Box<dyn Error>> {
         let entry = self.get_path(path.clone())?;
 
         if let Entry::File(file) = entry {
@@ -498,7 +498,7 @@ impl Vfs {
                     to,
                     Action::Create(
                         Entry::File(
-                            VfsFile::new(offset, file.length, file.nonce)
+                            VfsFile::new(offset, file.length, file.nonce, file.display_length)
                         )
                     )
                 )?;
@@ -509,13 +509,13 @@ impl Vfs {
             },
 
             None => {
-                self.file.seek_write(buf.as_slice(), (self.root.cur_offset as u64) + 4 + HEADER_SIZE)?;
+                self.file.seek_write(buf.as_slice(), (self.root.cur_offset as u64) + HEADER_SIZE + 4)?;
 
                 self.set_path(
                     to,
                     Action::Create(
                         Entry::File(
-                            VfsFile::new(self.root.cur_offset, file.length, file.nonce)
+                            VfsFile::new(self.root.cur_offset, file.length, file.nonce, file.display_length)
                         )
                     )
                 )?;
@@ -565,7 +565,7 @@ impl Vfs {
 
         for (path, entry) in &directory.entries {
             match entry {
-                Entry::File(file) => println!("{path:max$}   {:^max$}   {:^max$}", "File", file.length),
+                Entry::File(file) => println!("{path:max$}   {:^max$}   {:^max$}", "File", file.display_length),
                 Entry::Directory(directory) => println!("{path:max$}   {:^max$}   {:^max$}", "Dir", directory.entries.len())
             }
         }
@@ -631,10 +631,7 @@ impl Vfs {
 
         let nonce: [u8; 12] = rand::random();
 
-        let enc = match self.encrypt_data(text.as_bytes(), nonce) {
-            Ok(v) => v,
-            Err(_) => return Err("Error occured during encryption".into())
-        };
+        let enc = self.encrypt(text.as_bytes(), nonce)?;
 
         match self.root.free.iter().position(|(&len, _)| enc.len() <= len) {
             Some(key) => {
@@ -645,7 +642,7 @@ impl Vfs {
                     to,
                     Action::Create(
                         Entry::File(
-                            VfsFile::new(offset, len, nonce)
+                            VfsFile::new(offset, len, nonce, text.len())
                         )
                     )
                 )?;
@@ -665,7 +662,8 @@ impl Vfs {
                             VfsFile::new(
                                 self.root.cur_offset,
                                 len,
-                                nonce
+                                nonce,
+                                text.len()
                             )
                         )
                     )
@@ -677,7 +675,7 @@ impl Vfs {
         Ok(())
     }
 
-    fn export(&self, from: String, to: String) -> Result<(), Box<dyn Error>> {
+    fn export(&mut self, from: String, to: String) -> Result<(), Box<dyn Error>> {
         let entry = self.get_path(from.clone())?;
 
         if let Entry::File(vfs_file) = entry {
@@ -701,17 +699,18 @@ impl Vfs {
         let mut text = String::new();
         let mut line: String = scan!(".. ");
 
-        while line.trim_end() != "<< EOF" {
+        while !line.trim_end().ends_with("<< EOF") {
             text.push_str(line.as_str());
             line = scan!(".. ");
         }
 
+        line = line.trim_end().to_string();
+
+        text.push_str(&line[..(line.len() - 6)]);
+
         let nonce: [u8; 12] = rand::random();
 
-        let enc = match self.encrypt_data(text.as_bytes(), nonce) {
-            Ok(v) => v,
-            Err(_) => return Err("Error occured during encryption".into())
-        };
+        let enc = self.encrypt(text.as_bytes(), nonce)?;
 
         match enc.len().cmp(&file.length) {
             Ordering::Equal => {
@@ -732,13 +731,13 @@ impl Vfs {
                     path,
                     Action::Update(
                         Entry::File(
-                            VfsFile::new(file.offset, len, nonce)
+                            VfsFile::new(file.offset, len, nonce, text.len())
                         )
                     )
                 )?;
 
                 let mut buf = vec![0; file.length - len];
-                self.file.seek_write(&mut buf, file.offset as u64 + len as u64)?;
+                self.file.seek_write(&mut buf, file.offset as u64 - len as u64 + HEADER_SIZE + 4)?;
 
                 self.root.free.insert(len - file.length, len as u32);
                 Ok(())
@@ -760,7 +759,8 @@ impl Vfs {
                             VfsFile::new(
                                 self.root.cur_offset,
                                 len,
-                                nonce
+                                nonce,
+                                text.len()
                             )
                         )
                     )
@@ -780,11 +780,11 @@ Commands:
     ls:
         format - ls
         description - List all the entries in the current working directory.
-    
+
     rm:
         format - rm [file_path]
         description - Remove a file with the path specified.
-    
+
     cd:
         format - cd [folder_path]
         description - Change the current working directory to the path specified.
@@ -848,26 +848,7 @@ Commands:
         description - Defragments the Vfs and removes the free areas in between.
         note - Currently this feature is not yet implemented.
                Expected to be implemented by v2.5.0
-    
-    encrypt:
-        format - encrypt
-        description - A test command to check encryption.
-                      It encrypts using nonce=`unique nonce`.
 "#))
-    } 
-
-    fn encrypt(&self) -> Result<(), Box<dyn Error>> {
-        let text = scan!(".. ");
-        let nonce = Nonce::from_slice(b"unique nonce");
-        let enc = self.oracle.encrypt(&nonce, text.as_bytes()).unwrap();
-        Ok(println!("{}", encode(enc)))
-    }
-
-    fn decrypt(&self) -> Result<(), Box<dyn Error>> {
-        let text = scan!(".. ");
-        let nonce = Nonce::from_slice(b"unique nonce");
-        let dec = self.oracle.decrypt(&nonce, decode(text.trim_end())?.as_slice()).unwrap();
-        Ok(println!("{}", String::from_utf8(dec)?))
     }
 }
 
@@ -883,7 +864,7 @@ fn get(lst: &Vec<String>, idx: usize) -> String {
 fn main() {
     let mut vfs = Vfs::new("test.vfs".to_string());
     if let Err(err) = vfs.init() {
-        println!("{err}")
+        return println!("{err}");
     };
 
     let err = loop {
@@ -893,8 +874,6 @@ fn main() {
             Commands::LS => vfs.ls(),
             Commands::PWD => vfs.pwd(),
             Commands::HELP => Vfs::help(),
-            Commands::ENCRYPT => vfs.encrypt(),
-            Commands::DECRYPT => vfs.decrypt(),
             Commands::EXIT => break vfs.exit(),
             Commands::RESET => break vfs.reset(),
             Commands::DEFRAG => Err("Not implemented".into()),
