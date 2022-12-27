@@ -1,29 +1,21 @@
+mod datetime;
+use crate::datetime::DateTime;
+
+mod commands;
+use crate::commands::Commands;
+
 use std::{
     io::{Write, Read},
-    fs::{
-        File,
-        OpenOptions
-    },
+    fs::{File, OpenOptions},
     os::windows::prelude::FileExt,
     error::Error,
-    collections::{
-        HashMap,
-        BTreeMap,
-        hash_map::Entry as HashMapEntry
-    },
+    collections::{HashMap, BTreeMap, hash_map::Entry as HashMapEntry},
     cmp::Ordering,
-    path::{
-        PathBuf,
-        Path,
-        Component
-    }
+    path::{PathBuf, Path, Component}
 };
 
 use aes_gcm::{
-    aead::{
-        Aead,
-        KeyInit
-    },
+    aead::{Aead, KeyInit},
     Aes256Gcm,
     AesGcm,
     aes::Aes256, Nonce
@@ -36,15 +28,12 @@ use rkyv::{
     AlignedVec
 };
 
-use snap::raw::{
-    Decoder,
-    Encoder
-};
-
+use snap::raw::{Decoder, Encoder};
 use sha2::{Sha256, Digest};
 use generic_array::GenericArray;
 use typenum::{U12, U32};
 use bytecheck::CheckBytes;
+use chrono::{Utc, Datelike, Timelike};
 
 macro_rules! scan {
     ($var:expr) => {{
@@ -64,6 +53,7 @@ struct VfsFile {
     offset: u32,
     length: usize,
     display_length: usize,
+    date_time: u32,
     nonce: [u8; 12]
 }
 
@@ -87,6 +77,7 @@ enum Entry {
     )
 )]
 struct VfsDirectory {
+    date_time: u32,
     #[omit_bounds]
     #[archive_attr(omit_bounds)]
     entries: HashMap<String, Entry>
@@ -112,7 +103,6 @@ struct Root {
     free: BTreeMap<usize, u32>
 }
 
-#[allow(dead_code)]
 struct Vfs {
     oracle: AesGcm<Aes256, U12>,
     encoder: Encoder,
@@ -122,71 +112,25 @@ struct Vfs {
     cur_directory: PathBuf
 }
 
-#[derive(PartialEq, Eq)]
-enum Commands {
-    EXIT,
-    TOUCH,
-    CAT,
-    NANO,
-    CP,
-    MV,
-    RM,
-    LS,
-    RESET,
-    CD,
-    MKDIR,
-    PWD,
-    RMDIR,
-    IMPORT,
-    EXPORT,
-    DEFRAG,
-    HELP,
-    INVALID,
-}
-
-impl From<String> for Commands {
-    fn from(cmd: String) -> Self {
-        match cmd.as_str() {
-            "exit" | "ext" | "e" => Commands::EXIT,
-            "touch" | "tch" => Commands::TOUCH,
-            "cat" => Commands::CAT,
-            "nano" | "nn" => Commands::NANO,
-            "cp" => Commands::CP,
-            "mv" => Commands::MV,
-            "rm" => Commands::RM,
-            "ls" => Commands::LS,
-            "reset" | "rst" | "r" => Commands::RESET,
-            "cd" => Commands::CD,
-            "mkdir" => Commands::MKDIR,
-            "pwd" => Commands::PWD,
-            "rmdir" => Commands::RMDIR,
-            "import" | "imp" => Commands::IMPORT,
-            "export" | "exp" => Commands::EXPORT,
-            "defrag" | "dfrg" => Commands::DEFRAG,
-            "help" | "hlp" | "h" => Commands::HELP,
-            _ => Commands::INVALID
-        }
-    }
-}
-
 impl VfsFile {
-    fn new(offset: u32, length: usize, nonce: [u8; 12], display_length: usize) -> Self {
+    fn new(offset: u32, length: usize, nonce: [u8; 12], display_length: usize, date_time: u32) -> Self {
         Self {
             offset,
             length,
             display_length,
-            nonce
+            nonce,
+            date_time
         }
     }
 }
 
 impl VfsDirectory {
-    fn new(entries: HashMap<String, Entry>) -> Self {
-        Self { entries }
+    fn new(entries: HashMap<String, Entry>, date_time: u32) -> Self {
+        Self { entries, date_time }
     }
 
     fn default() -> Self {
-        Self::new(HashMap::new())
+        Self::new(HashMap::new(), 0)
     }
 }
 
@@ -311,7 +255,12 @@ impl Vfs {
                 if let Entry::Directory(dir) = entry {
                     match dir.entries.entry(last.clone()) {
                         HashMapEntry::Occupied(_) => return Err("File already exists.".into()),
-                        HashMapEntry::Vacant(entry) => entry.insert(action_entry)
+                        HashMapEntry::Vacant(entry) => {
+                            let dt = Utc::now();
+                            let date_time = DateTime::new(dt.hour() + 1, dt.minute() + 1, dt.day(), dt.month(), dt.year() as u32);
+                            dir.date_time = date_time.to_u32();
+                            entry.insert(action_entry)
+                        }
                     };
                 }
             },
@@ -319,7 +268,12 @@ impl Vfs {
             Action::Delete => {
                 if let Entry::Directory(dir) = entry {
                     match dir.entries.entry(last.clone()) {
-                        HashMapEntry::Occupied( entry) => entry.remove(),
+                        HashMapEntry::Occupied( entry) => {
+                            let dt = Utc::now();
+                            let date_time = DateTime::new(dt.hour() + 1, dt.minute() + 1, dt.day(), dt.month(), dt.year() as u32);
+                            dir.date_time = date_time.to_u32();
+                            entry.remove()
+                        },
                         HashMapEntry::Vacant(_) => return Err("File doesn't exist.".into())
                     };
                 }
@@ -328,7 +282,12 @@ impl Vfs {
             Action::Update(action_entry) => {
                 if let Entry::Directory(dir) = entry {
                     match dir.entries.entry(last.clone()) {
-                        HashMapEntry::Occupied(mut entry) => entry.insert(action_entry),
+                        HashMapEntry::Occupied(mut entry) => {
+                            let dt = Utc::now();
+                            let date_time = DateTime::new(dt.hour() + 1, dt.minute() + 1, dt.day(), dt.month(), dt.year() as u32);
+                            dir.date_time = date_time.to_u32();
+                            entry.insert(action_entry)
+                        },
                         HashMapEntry::Vacant(_) => return Err("File doesn't exist.".into())
                     };
                 }
@@ -423,6 +382,8 @@ impl Vfs {
         let nonce: [u8; 12] = rand::random();
 
         let enc = self.encrypt(text.as_bytes(), nonce)?;
+        let dt = Utc::now();
+        let date_time = DateTime::new(dt.hour() + 1, dt.minute() + 1, dt.day(), dt.month(), dt.year() as u32);
 
         match self.root.free.iter().position(|(&len, _)| enc.len() <= len) {
             Some(key) => {
@@ -433,7 +394,7 @@ impl Vfs {
                     path,
                     Action::Create(
                         Entry::File(
-                            VfsFile::new(offset, len, nonce, text.len())
+                            VfsFile::new(offset, len, nonce, text.len(), date_time.to_u32())
                         )
                     )
                 )?;
@@ -454,7 +415,8 @@ impl Vfs {
                                 self.root.cur_offset,
                                 len,
                                 nonce,
-                                text.len()
+                                text.len(),
+                                date_time.to_u32()
                             )
                         )
                     )
@@ -488,6 +450,8 @@ impl Vfs {
         let mut buf = vec![0; file.length];
 
         self.file.seek_read(&mut buf, (file.offset as u64) + HEADER_SIZE + 4)?;
+        let dt = Utc::now();
+        let date_time = DateTime::new(dt.hour() + 1, dt.minute() + 1, dt.day(), dt.month(), dt.year() as u32);
 
         match self.root.free.iter().position(|(&len, _)| file.length <= len) {
             Some(len) => {
@@ -498,7 +462,7 @@ impl Vfs {
                     to,
                     Action::Create(
                         Entry::File(
-                            VfsFile::new(offset, file.length, file.nonce, file.display_length)
+                            VfsFile::new(offset, file.length, file.nonce, file.display_length, date_time.to_u32())
                         )
                     )
                 )?;
@@ -515,7 +479,7 @@ impl Vfs {
                     to,
                     Action::Create(
                         Entry::File(
-                            VfsFile::new(self.root.cur_offset, file.length, file.nonce, file.display_length)
+                            VfsFile::new(self.root.cur_offset, file.length, file.nonce, file.display_length, date_time.to_u32())
                         )
                     )
                 )?;
@@ -560,13 +524,15 @@ impl Vfs {
             _ => 4
         };
 
-        println!("{:^max$}   {:^max$}   {:^max$}", "Name", "Type", "Size");
-        println!("{0:-<max$}   {0:-<max$}   {0:-<max$}", "");
+        let width = 23;
+
+        println!("{:^max$}   {:^max$}   {:^max$}   {:^width$}", "Name", "Type", "Size", "Date");
+        println!("{0:-<max$}   {0:-<max$}   {0:-<max$}   {0:-<width$}", "");
 
         for (path, entry) in &directory.entries {
             match entry {
-                Entry::File(file) => println!("{path:max$}   {:^max$}   {:^max$}", "File", file.display_length),
-                Entry::Directory(directory) => println!("{path:max$}   {:^max$}   {:^max$}", "Dir", directory.entries.len())
+                Entry::File(file) => println!("{path:max$}   File   {:^max$}   {:^width$}", file.display_length, DateTime::from_u32(file.date_time)),
+                Entry::Directory(directory) => println!("{path:max$}   Dir    {:^max$}   {:^width$}", directory.entries.len(), DateTime::from_u32(directory.date_time))
             }
         }
 
@@ -593,11 +559,14 @@ impl Vfs {
     }
 
     fn mkdir(&mut self, path: String) -> Result<(), Box<dyn Error>> {
+        let dt = Utc::now();
+        let date_time = DateTime::new(dt.hour() + 1, dt.minute() + 1, dt.day(), dt.month(), dt.year() as u32);
+
         self.set_path(
             path,
             Action::Create(
                 Entry::Directory(
-                    VfsDirectory::default()
+                    VfsDirectory::new(HashMap::new(), date_time.to_u32())
                 )
             )
         )
@@ -632,6 +601,8 @@ impl Vfs {
         let nonce: [u8; 12] = rand::random();
 
         let enc = self.encrypt(text.as_bytes(), nonce)?;
+        let dt = Utc::now();
+        let date_time = DateTime::new(dt.hour() + 1, dt.minute() + 1, dt.day(), dt.month(), dt.year() as u32);
 
         match self.root.free.iter().position(|(&len, _)| enc.len() <= len) {
             Some(key) => {
@@ -642,7 +613,7 @@ impl Vfs {
                     to,
                     Action::Create(
                         Entry::File(
-                            VfsFile::new(offset, len, nonce, text.len())
+                            VfsFile::new(offset, len, nonce, text.len(), date_time.to_u32())
                         )
                     )
                 )?;
@@ -663,7 +634,8 @@ impl Vfs {
                                 self.root.cur_offset,
                                 len,
                                 nonce,
-                                text.len()
+                                text.len(),
+                                date_time.to_u32()
                             )
                         )
                     )
@@ -711,6 +683,8 @@ impl Vfs {
         let nonce: [u8; 12] = rand::random();
 
         let enc = self.encrypt(text.as_bytes(), nonce)?;
+        let dt = Utc::now();
+        let date_time = DateTime::new(dt.hour() + 1, dt.minute() + 1, dt.day(), dt.month(), dt.year() as u32);
 
         match enc.len().cmp(&file.length) {
             Ordering::Equal => {
@@ -719,7 +693,7 @@ impl Vfs {
                 self.set_path(
                     path,
                     Action::Update(
-                        Entry::File(VfsFile { nonce, ..file })
+                        Entry::File(VfsFile { nonce, date_time: date_time.to_u32(), ..file })
                     )
                 )
             },
@@ -731,7 +705,7 @@ impl Vfs {
                     path,
                     Action::Update(
                         Entry::File(
-                            VfsFile::new(file.offset, len, nonce, text.len())
+                            VfsFile::new(file.offset, len, nonce, text.len(), date_time.to_u32())
                         )
                     )
                 )?;
@@ -760,7 +734,8 @@ impl Vfs {
                                 self.root.cur_offset,
                                 len,
                                 nonce,
-                                text.len()
+                                text.len(),
+                                date_time.to_u32()
                             )
                         )
                     )

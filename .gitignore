@@ -1,4 +1,4 @@
 /target
 /vfs*.exe
 /**/*.vfs
-build.bat
+build.ps1

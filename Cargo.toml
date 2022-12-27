@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 aes-gcm = "0.10.1"
 bytecheck = "0.6.9"
+chrono = { version = "0.4.23", features = ["rkyv"] }
 flate2 = "1.0.25"
 generic-array = "0.14.6"
 rand = "0.8.5"
