@@ -746,7 +746,7 @@ impl Vfs {
 
     fn help() -> Result<(), Box<dyn Error>> {
         Ok(println!(r#"Very Fast and Secure file system.
-Version: 2.0.0
+Version: 2.3.0
 By: Blood Rogue (github.com/blood-rogue)
 
 Usage: [command] [..options]
