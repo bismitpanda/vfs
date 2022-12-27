@@ -5,7 +5,7 @@ use std::{
     fs::{File, OpenOptions},
     os::windows::prelude::FileExt,
     error::Error,
-    collections::{HashMap, BTreeMap, hash_map::Entry as HashMapEntry},
+    collections::{HashMap, BTreeMap, hash_map::Entry::{Occupied, Vacant}},
     cmp::Ordering,
     path::{PathBuf, Path, Component}
 };
@@ -14,7 +14,8 @@ use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm,
     AesGcm,
-    aes::Aes256, Nonce
+    aes::Aes256,
+    Nonce
 };
 
 use rkyv::{
@@ -47,7 +48,7 @@ macro_rules! scan {
 #[derive(Archive, Serialize, Deserialize, Clone)]
 #[archive_attr(derive(CheckBytes))]
 struct VfsFile {
-    offset: u32,
+    offset: usize,
     length: usize,
     display_length: usize,
     date_time: u32,
@@ -62,17 +63,8 @@ enum Entry {
 }
 
 #[derive(Archive, Serialize, Deserialize, Clone)]
-#[archive(
-    bound(
-        serialize = "__S: rkyv::ser::ScratchSpace + rkyv::ser::Serializer"
-    )
-)]
-#[archive_attr(
-    derive(CheckBytes),
-    check_bytes(
-        bound = "__C: rkyv::validation::ArchiveContext, <__C as rkyv::Fallible>::Error: std::error::Error"
-    )
-)]
+#[archive(bound(serialize = "__S: rkyv::ser::ScratchSpace + rkyv::ser::Serializer"))]
+#[archive_attr(derive(CheckBytes),check_bytes(bound = "__C: rkyv::validation::ArchiveContext, <__C as rkyv::Fallible>::Error: std::error::Error"))]
 struct VfsDirectory {
     date_time: u32,
     #[omit_bounds]
@@ -81,23 +73,14 @@ struct VfsDirectory {
 }
 
 #[derive(Archive, Serialize, Deserialize)]
-#[archive(
-    bound(
-        serialize = "__S: rkyv::ser::ScratchSpace + rkyv::ser::Serializer"
-    )
-)]
-#[archive_attr(
-    derive(CheckBytes),
-    check_bytes(
-        bound = "__C: rkyv::validation::ArchiveContext, <__C as rkyv::Fallible>::Error: std::error::Error"
-    )
-)]
+#[archive(bound(serialize = "__S: rkyv::ser::ScratchSpace + rkyv::ser::Serializer"))]
+#[archive_attr(derive(CheckBytes),check_bytes(bound = "__C: rkyv::validation::ArchiveContext, <__C as rkyv::Fallible>::Error: std::error::Error"))]
 struct Root {
-    cur_offset: u32,
+    cur_offset: usize,
     #[omit_bounds]
     #[archive_attr(omit_bounds)]
     entries: HashMap<String, Entry>,
-    free: BTreeMap<usize, u32>
+    free: BTreeMap<usize, usize>
 }
 
 pub struct Vfs {
@@ -110,7 +93,7 @@ pub struct Vfs {
 }
 
 impl VfsFile {
-    fn new(offset: u32, length: usize, nonce: [u8; 12], display_length: usize, date_time: u32) -> Self {
+    fn new(offset: usize, length: usize, nonce: [u8; 12], display_length: usize, date_time: u32) -> Self {
         Self {
             offset,
             length,
@@ -136,7 +119,7 @@ impl Default for Root {
         Root {
             cur_offset: 0,
             entries: HashMap::from([
-                ("\\".to_string(), Entry::Directory(VfsDirectory::default()))
+                ("/".to_string(), Entry::Directory(VfsDirectory::default()))
             ]),
             free: BTreeMap::new()
         }
@@ -164,17 +147,16 @@ fn normalize_path(path: &Path) -> PathBuf {
 
     for component in components {
         match component {
-            Component::Prefix(..) => unreachable!(),
             Component::RootDir => {
                 ret.push(component.as_os_str());
-            }
-            Component::CurDir => {}
+            },
             Component::ParentDir => {
                 ret.pop();
-            }
+            },
             Component::Normal(c) => {
                 ret.push(c);
-            }
+            },
+            _ => {}
         }
     }
     ret
@@ -194,7 +176,7 @@ impl Vfs {
             root: Root::default(),
             encoder: Encoder::new(),
             decoder: Decoder::new(),
-            cur_directory: Path::new(r"\").join(""),
+            cur_directory: Path::new("/").join(""),
             file: OpenOptions::new().write(true).read(true).create(true).open(path).unwrap()
         }
     }
@@ -231,15 +213,14 @@ impl Vfs {
             match entry {
                 Entry::Directory(dir) => {
                     entry = match dir.entries.entry(part.clone()) {
-                        HashMapEntry::Occupied(entry) => {
-                            HashMapEntry::Occupied(entry).or_insert(
+                        Occupied(entry) => {
+                            Occupied(entry).or_insert(
                                 Entry::Directory(
                                     VfsDirectory::default()
                                 )
                             )
                         },
-
-                        HashMapEntry::Vacant(_) => return Err(format!("Directory `{part}` not found.").into()),
+                        Vacant(_) => return Err(format!("Directory `{part}` not found.").into()),
                     }
                 },
 
@@ -247,64 +228,59 @@ impl Vfs {
             }
         }
 
-        match action {
-            Action::Create(action_entry) => {
-                if let Entry::Directory(dir) = entry {
+        if let Entry::Directory(dir) = entry {
+            match action {
+                Action::Create(action_entry) => {
                     match dir.entries.entry(last.clone()) {
-                        HashMapEntry::Occupied(_) => return Err("File already exists.".into()),
-                        HashMapEntry::Vacant(entry) => {
+                        Occupied(_) => return Err("File already exists.".into()),
+                        Vacant(entry) => {
                             let dt = Utc::now();
                             let date_time = DateTime::new(dt.hour() + 1, dt.minute() + 1, dt.day(), dt.month(), dt.year() as u32);
                             dir.date_time = date_time.to_u32();
                             entry.insert(action_entry)
                         }
                     };
-                }
-            },
+                },
 
-            Action::Delete => {
-                if let Entry::Directory(dir) = entry {
+                Action::Delete => {
                     match dir.entries.entry(last.clone()) {
-                        HashMapEntry::Occupied( entry) => {
+                        Occupied( entry) => {
                             let dt = Utc::now();
-                            let date_time = DateTime::new(dt.hour() + 1, dt.minute() + 1, dt.day(), dt.month(), dt.year() as u32);
-                            dir.date_time = date_time.to_u32();
+                            dir.date_time = DateTime::new(dt.hour() + 1, dt.minute() + 1, dt.day(), dt.month(), dt.year() as u32).to_u32();
                             entry.remove()
                         },
-                        HashMapEntry::Vacant(_) => return Err("File doesn't exist.".into())
+                        Vacant(_) => return Err("File doesn't exist.".into())
                     };
-                }
-            },
+                },
 
-            Action::Update(action_entry) => {
-                if let Entry::Directory(dir) = entry {
+                Action::Update(action_entry) => {
                     match dir.entries.entry(last.clone()) {
-                        HashMapEntry::Occupied(mut entry) => {
+                        Occupied(mut entry) => {
                             let dt = Utc::now();
-                            let date_time = DateTime::new(dt.hour() + 1, dt.minute() + 1, dt.day(), dt.month(), dt.year() as u32);
-                            dir.date_time = date_time.to_u32();
+                            dir.date_time = DateTime::new(dt.hour() + 1, dt.minute() + 1, dt.day(), dt.month(), dt.year() as u32).to_u32();
                             entry.insert(action_entry)
                         },
-                        HashMapEntry::Vacant(_) => return Err("File doesn't exist.".into())
+                        Vacant(_) => return Err("File doesn't exist.".into())
                     };
                 }
             }
         }
+
         Ok(())
     }
 
     pub fn init(&mut self) -> Result<(), Box<dyn Error>> {
-        let mut meta_len_bytes= [0; 4];
+        let mut meta_len_bytes= [0; 8];
         self.file.seek_read(&mut meta_len_bytes, 0)?;
-        let meta_len = u32::from_ne_bytes(meta_len_bytes);
+        let meta_len = usize::from_ne_bytes(meta_len_bytes);
 
         if meta_len == 0 {
             self.root = Root::default();
             return Ok(());
         }
 
-        let new_buf: &mut Vec<u8> = &mut vec![0; meta_len as usize];
-        self.file.seek_read(new_buf, 4)?;
+        let new_buf = &mut vec![u8::MIN; meta_len as usize];
+        self.file.seek_read(new_buf, 8)?;
 
         let nonce = Nonce::from_slice(b"secure nonce");
 
@@ -340,6 +316,7 @@ impl Vfs {
         }
     }
 
+    #[inline(always)]
     fn compress(&mut self, buf: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
         let compressed = self.encoder.compress_vec(buf)?;
         Ok(compressed)
@@ -347,7 +324,7 @@ impl Vfs {
 
     fn read_encrypted(&mut self, length: usize, offset: u64, nonce: [u8; 12]) -> Result<Vec<u8>, Box<dyn Error>> {
         let new_buf: &mut Vec<u8> = &mut vec![0; length];
-        self.file.seek_read(new_buf, offset + HEADER_SIZE + 4)?;
+        self.file.seek_read(new_buf, offset + HEADER_SIZE + 8)?;
 
         let nonce = Nonce::from_slice(&nonce);
 
@@ -365,8 +342,8 @@ impl Vfs {
         const SIZE: usize = HEADER_SIZE as usize;
         let bytes = rkyv::to_bytes::<_, SIZE>(&self.root)?;
         let enc_bytes = self.encrypt(bytes.as_slice(), *b"secure nonce")?;
-        let len = self.file.seek_write(&enc_bytes, 4)?;
-        self.file.seek_write(&(len as u32).to_ne_bytes(), 0)?;
+        let len = self.file.seek_write(&enc_bytes, 8)?;
+        self.file.seek_write(&len.to_ne_bytes(), 0)?;
 
         Ok(())
     }
@@ -393,7 +370,7 @@ impl Vfs {
         match self.root.free.iter().position(|(&len, _)| enc.len() <= len) {
             Some(key) => {
                 let offset = self.root.free.remove(&key).unwrap();
-                let len = self.file.seek_write(enc.as_slice(), offset as u64 + HEADER_SIZE + 4)?;
+                let len = self.file.seek_write(enc.as_slice(), offset as u64 + HEADER_SIZE + 8)?;
 
                 self.set_path(
                     path,
@@ -405,12 +382,12 @@ impl Vfs {
                 )?;
 
                 if len < key {
-                    self.root.free.insert(key - len, offset + len as u32);
+                    self.root.free.insert(key - len, offset + len);
                 }
             },
 
             None => {
-                let len = self.file.seek_write(enc.as_slice(), self.root.cur_offset as u64 + HEADER_SIZE + 4)?;
+                let len = self.file.seek_write(enc.as_slice(), self.root.cur_offset as u64 + HEADER_SIZE + 8)?;
 
                 self.set_path(
                     path,
@@ -426,7 +403,7 @@ impl Vfs {
                         )
                     )
                 )?;
-                self.root.cur_offset += len as u32;
+                self.root.cur_offset += len;
             }
         };
 
@@ -454,14 +431,14 @@ impl Vfs {
 
         let mut buf = vec![0; file.length];
 
-        self.file.seek_read(&mut buf, (file.offset as u64) + HEADER_SIZE + 4)?;
+        self.file.seek_read(&mut buf, (file.offset as u64) + HEADER_SIZE + 8)?;
         let dt = Utc::now();
         let date_time = DateTime::new(dt.hour() + 1, dt.minute() + 1, dt.day(), dt.month(), dt.year() as u32);
 
         match self.root.free.iter().position(|(&len, _)| file.length <= len) {
             Some(len) => {
                 let offset = self.root.free.remove(&len).unwrap();
-                self.file.seek_write(&buf.as_slice(), offset as u64 + HEADER_SIZE + 4)?;
+                self.file.seek_write(&buf.as_slice(), offset as u64 + HEADER_SIZE + 8)?;
 
                 self.set_path(
                     to,
@@ -473,12 +450,12 @@ impl Vfs {
                 )?;
 
                 if file.length < len {
-                    self.root.free.insert(len - file.length, offset + file.length as u32);
+                    self.root.free.insert(len - file.length, offset + file.length);
                 }
             },
 
             None => {
-                self.file.seek_write(buf.as_slice(), (self.root.cur_offset as u64) + HEADER_SIZE + 4)?;
+                self.file.seek_write(buf.as_slice(), (self.root.cur_offset as u64) + HEADER_SIZE + 8)?;
 
                 self.set_path(
                     to,
@@ -513,7 +490,7 @@ impl Vfs {
         };
 
         let mut buf = vec![0; file.length];
-        self.file.seek_write(&mut buf, (file.offset as u64) + HEADER_SIZE + 4)?;
+        self.file.seek_write(&mut buf, (file.offset as u64) + HEADER_SIZE + 8)?;
 
         self.set_path(path, Action::Delete)
     }
@@ -600,19 +577,19 @@ impl Vfs {
     pub fn import(&mut self, from: String, to: String) -> Result<(), Box<dyn Error>> {
 
         let mut file = File::open(from)?;
-        let text = &mut String::new();
-        file.read_to_string(text)?;
+        let text = &mut Vec::new();
+        file.read_to_end(text)?;
 
         let nonce: [u8; 12] = rand::random();
 
-        let enc = self.encrypt(text.as_bytes(), nonce)?;
+        let enc = self.encrypt(text.as_slice(), nonce)?;
         let dt = Utc::now();
         let date_time = DateTime::new(dt.hour() + 1, dt.minute() + 1, dt.day(), dt.month(), dt.year() as u32);
 
         match self.root.free.iter().position(|(&len, _)| enc.len() <= len) {
             Some(key) => {
                 let offset = self.root.free.remove(&key).unwrap();
-                let len = self.file.seek_write(enc.as_slice(), offset as u64 + HEADER_SIZE + 4)?;
+                let len = self.file.seek_write(enc.as_slice(), offset as u64 + HEADER_SIZE + 8)?;
 
                 self.set_path(
                     to,
@@ -624,12 +601,12 @@ impl Vfs {
                 )?;
 
                 if len < key {
-                    self.root.free.insert(key - len, offset + len as u32);
+                    self.root.free.insert(key - len, offset + len);
                 }
             },
 
             None => {
-                let len = self.file.seek_write(enc.as_slice(), self.root.cur_offset as u64 + HEADER_SIZE + 4)?;
+                let len = self.file.seek_write(enc.as_slice(), self.root.cur_offset as u64 + HEADER_SIZE + 8)?;
 
                 self.set_path(
                     to,
@@ -645,7 +622,7 @@ impl Vfs {
                         )
                     )
                 )?;
-                self.root.cur_offset += len as u32;
+                self.root.cur_offset += len;
             }
         };
 
@@ -693,18 +670,20 @@ impl Vfs {
 
         match enc.len().cmp(&file.length) {
             Ordering::Equal => {
-                self.file.seek_write(enc.as_slice(), file.offset as u64 + HEADER_SIZE + 4)?;
+                self.file.seek_write(enc.as_slice(), file.offset as u64 + HEADER_SIZE + 8)?;
 
                 self.set_path(
                     path,
                     Action::Update(
-                        Entry::File(VfsFile { nonce, date_time: date_time.to_u32(), ..file })
+                        Entry::File(
+                            VfsFile::new(file.offset, file.length, nonce, file.display_length, date_time.to_u32())
+                        )
                     )
                 )
             },
 
             Ordering::Less => {
-                let len = self.file.seek_write(enc.as_slice(), file.offset as u64 + HEADER_SIZE + 4)?;
+                let len = self.file.seek_write(enc.as_slice(), file.offset as u64 + HEADER_SIZE + 8)?;
 
                 self.set_path(
                     path,
@@ -716,20 +695,20 @@ impl Vfs {
                 )?;
 
                 let mut buf = vec![0; file.length - len];
-                self.file.seek_write(&mut buf, file.offset as u64 - len as u64 + HEADER_SIZE + 4)?;
+                self.file.seek_write(&mut buf, file.offset as u64 - len as u64 + HEADER_SIZE + 8)?;
 
-                self.root.free.insert(len - file.length, len as u32);
+                self.root.free.insert(len - file.length, len);
                 Ok(())
             },
 
             Ordering::Greater => {
                 self.root.free.insert(file.length, file.offset);
 
-                let len = self.file.seek_write(enc.as_slice(), self.root.cur_offset as u64 + HEADER_SIZE + 4)?;
-                self.root.cur_offset += len as u32;
+                let len = self.file.seek_write(enc.as_slice(), self.root.cur_offset as u64 + HEADER_SIZE + 8)?;
+                self.root.cur_offset += len;
 
                 let empty_bytes = vec![0; file.length];
-                self.file.seek_write(empty_bytes.as_slice(), file.offset as u64 + HEADER_SIZE + 4)?;
+                self.file.seek_write(empty_bytes.as_slice(), file.offset as u64 + HEADER_SIZE + 8)?;
 
                 self.set_path(
                     path,

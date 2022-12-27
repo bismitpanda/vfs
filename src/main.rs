@@ -8,6 +8,7 @@ use crate::commands::Commands;
 mod vfs;
 use vfs::Vfs;
 
+#[inline(always)]
 fn get(lst: &Vec<String>, idx: usize) -> String {
     match lst.get(idx) {
         Some(s) => s.clone(),
