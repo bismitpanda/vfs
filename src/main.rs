@@ -306,10 +306,18 @@ impl Vfs {
             return Ok(());
         }
 
-        let buf = self.read_encrypted(meta_len as usize, 4, *b"secure nonce")?;
+        let new_buf: &mut Vec<u8> = &mut vec![0; meta_len as usize];
+        self.file.seek_read(new_buf, 4)?;
+
+        let nonce = Nonce::from_slice(b"secure nonce");
+
+        let decrypted_buf = match self.oracle.decrypt(&nonce, self.decoder.decompress_vec(new_buf.as_slice())?.as_ref()) {
+            Ok(v) => v,
+            Err(_) => return Err("Error occured during decryption".into())
+        };
 
         let mut aligned_vec = AlignedVec::new();
-        aligned_vec.extend_from_slice(&buf[..(meta_len as usize)]);
+        aligned_vec.extend_from_slice(decrypted_buf.as_slice());
 
         self.root = rkyv::from_bytes::<Root>(&aligned_vec)?;
 
