@@ -1,4 +1,4 @@
-use crate::DateTime;
+use crate::VfsDateTime;
 
 use std::{
     io::{Write, Read},
@@ -30,7 +30,6 @@ use sha2::{Sha256, Digest};
 use generic_array::GenericArray;
 use typenum::{U12, U32};
 use bytecheck::CheckBytes;
-use chrono::{Utc, Datelike, Timelike};
 
 #[macro_export]
 macro_rules! scan {
@@ -119,7 +118,7 @@ impl Default for Root {
         Root {
             cur_offset: 0,
             entries: HashMap::from([
-                ("/".to_string(), Entry::Directory(VfsDirectory::default()))
+                (r"\".to_string(), Entry::Directory(VfsDirectory::default()))
             ]),
             free: BTreeMap::new()
         }
@@ -170,13 +169,13 @@ enum Action {
 
 impl Vfs {
     pub fn new(path: String) -> Self {
-        let cipher = Aes256Gcm::new(GenericArray::from_slice(get_key().as_slice()));
+        let cipher = Aes256Gcm::new(&get_key());
         Vfs {
             oracle: cipher,
             root: Root::default(),
             encoder: Encoder::new(),
             decoder: Decoder::new(),
-            cur_directory: Path::new("/").join(""),
+            cur_directory: Path::new(r"\").join(""),
             file: OpenOptions::new().write(true).read(true).create(true).open(path).unwrap()
         }
     }
@@ -228,14 +227,14 @@ impl Vfs {
             }
         }
 
+        let date_time = VfsDateTime::from_datetime();
+
         if let Entry::Directory(dir) = entry {
             match action {
                 Action::Create(action_entry) => {
                     match dir.entries.entry(last.clone()) {
-                        Occupied(_) => return Err("File already exists.".into()),
+                        Occupied(_) => return Err("Entry already exists.".into()),
                         Vacant(entry) => {
-                            let dt = Utc::now();
-                            let date_time = DateTime::new(dt.hour() + 1, dt.minute() + 1, dt.day(), dt.month(), dt.year() as u32);
                             dir.date_time = date_time.to_u32();
                             entry.insert(action_entry)
                         }
@@ -245,8 +244,7 @@ impl Vfs {
                 Action::Delete => {
                     match dir.entries.entry(last.clone()) {
                         Occupied( entry) => {
-                            let dt = Utc::now();
-                            dir.date_time = DateTime::new(dt.hour() + 1, dt.minute() + 1, dt.day(), dt.month(), dt.year() as u32).to_u32();
+                            dir.date_time = date_time.to_u32();
                             entry.remove()
                         },
                         Vacant(_) => return Err("File doesn't exist.".into())
@@ -256,8 +254,7 @@ impl Vfs {
                 Action::Update(action_entry) => {
                     match dir.entries.entry(last.clone()) {
                         Occupied(mut entry) => {
-                            let dt = Utc::now();
-                            dir.date_time = DateTime::new(dt.hour() + 1, dt.minute() + 1, dt.day(), dt.month(), dt.year() as u32).to_u32();
+                            dir.date_time = date_time.to_u32();
                             entry.insert(action_entry)
                         },
                         Vacant(_) => return Err("File doesn't exist.".into())
@@ -316,7 +313,6 @@ impl Vfs {
         }
     }
 
-    #[inline(always)]
     fn compress(&mut self, buf: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
         let compressed = self.encoder.compress_vec(buf)?;
         Ok(compressed)
@@ -364,8 +360,7 @@ impl Vfs {
         let nonce: [u8; 12] = rand::random();
 
         let enc = self.encrypt(text.as_bytes(), nonce)?;
-        let dt = Utc::now();
-        let date_time = DateTime::new(dt.hour() + 1, dt.minute() + 1, dt.day(), dt.month(), dt.year() as u32);
+        let date_time = VfsDateTime::from_datetime();
 
         match self.root.free.iter().position(|(&len, _)| enc.len() <= len) {
             Some(key) => {
@@ -432,8 +427,7 @@ impl Vfs {
         let mut buf = vec![0; file.length];
 
         self.file.seek_read(&mut buf, (file.offset as u64) + HEADER_SIZE + 8)?;
-        let dt = Utc::now();
-        let date_time = DateTime::new(dt.hour() + 1, dt.minute() + 1, dt.day(), dt.month(), dt.year() as u32);
+        let date_time = VfsDateTime::from_datetime();
 
         match self.root.free.iter().position(|(&len, _)| file.length <= len) {
             Some(len) => {
@@ -513,8 +507,8 @@ impl Vfs {
 
         for (path, entry) in &directory.entries {
             match entry {
-                Entry::File(file) => println!("{path:max$}   File   {:^max$}   {:^width$}", file.display_length, DateTime::from_u32(file.date_time)),
-                Entry::Directory(directory) => println!("{path:max$}   Dir    {:^max$}   {:^width$}", directory.entries.len(), DateTime::from_u32(directory.date_time))
+                Entry::File(file) => println!("{path:max$}   File   {:^max$}   {:^width$}", file.display_length, VfsDateTime::from_u32(file.date_time)),
+                Entry::Directory(directory) => println!("{path:max$}   Dir    {:^max$}   {:^width$}", directory.entries.len(), VfsDateTime::from_u32(directory.date_time))
             }
         }
 
@@ -541,8 +535,7 @@ impl Vfs {
     }
 
     pub fn mkdir(&mut self, path: String) -> Result<(), Box<dyn Error>> {
-        let dt = Utc::now();
-        let date_time = DateTime::new(dt.hour() + 1, dt.minute() + 1, dt.day(), dt.month(), dt.year() as u32);
+        let date_time = VfsDateTime::from_datetime();
 
         self.set_path(
             path,
@@ -583,8 +576,7 @@ impl Vfs {
         let nonce: [u8; 12] = rand::random();
 
         let enc = self.encrypt(text.as_slice(), nonce)?;
-        let dt = Utc::now();
-        let date_time = DateTime::new(dt.hour() + 1, dt.minute() + 1, dt.day(), dt.month(), dt.year() as u32);
+        let date_time = VfsDateTime::from_datetime();
 
         match self.root.free.iter().position(|(&len, _)| enc.len() <= len) {
             Some(key) => {
@@ -665,10 +657,11 @@ impl Vfs {
         let nonce: [u8; 12] = rand::random();
 
         let enc = self.encrypt(text.as_bytes(), nonce)?;
-        let dt = Utc::now();
-        let date_time = DateTime::new(dt.hour() + 1, dt.minute() + 1, dt.day(), dt.month(), dt.year() as u32);
+        let date_time = VfsDateTime::from_datetime();
 
-        match enc.len().cmp(&file.length) {
+        let len = enc.len();
+
+        match len.cmp(&file.length) {
             Ordering::Equal => {
                 self.file.seek_write(enc.as_slice(), file.offset as u64 + HEADER_SIZE + 8)?;
 
@@ -683,7 +676,7 @@ impl Vfs {
             },
 
             Ordering::Less => {
-                let len = self.file.seek_write(enc.as_slice(), file.offset as u64 + HEADER_SIZE + 8)?;
+                self.file.seek_write(enc.as_slice(), file.offset as u64 + HEADER_SIZE + 8)?;
 
                 self.set_path(
                     path,
@@ -703,12 +696,10 @@ impl Vfs {
 
             Ordering::Greater => {
                 self.root.free.insert(file.length, file.offset);
+                self.file.seek_write(vec![0; file.length].as_slice(), file.offset as u64 + HEADER_SIZE + 8)?;
 
-                let len = self.file.seek_write(enc.as_slice(), self.root.cur_offset as u64 + HEADER_SIZE + 8)?;
+                self.file.seek_write(enc.as_slice(), self.root.cur_offset as u64 + HEADER_SIZE + 8)?;
                 self.root.cur_offset += len;
-
-                let empty_bytes = vec![0; file.length];
-                self.file.seek_write(empty_bytes.as_slice(), file.offset as u64 + HEADER_SIZE + 8)?;
 
                 self.set_path(
                     path,

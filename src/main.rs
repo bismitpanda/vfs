@@ -1,20 +1,12 @@
 use std::io::Write;
 mod datetime;
-use crate::datetime::DateTime;
+use crate::datetime::VfsDateTime;
 
 mod commands;
 use crate::commands::Commands;
 
 mod vfs;
 use vfs::Vfs;
-
-#[inline(always)]
-fn get(lst: &Vec<String>, idx: usize) -> String {
-    match lst.get(idx) {
-        Some(s) => s.clone(),
-        None => String::new()
-    }
-}
 
 fn main() {
     let mut vfs = Vfs::new("test.vfs".to_string());
@@ -25,7 +17,7 @@ fn main() {
     let err = loop {
         let cmd = scan!(">> ");
         let cmds: Vec<String> = cmd.trim_end().split(' ').map(String::from).collect();
-        let res = match Commands::from(get(&cmds, 0)) {
+        let res = match Commands::from(cmds[0].clone()) {
             Commands::LS => vfs.ls(),
             Commands::PWD => vfs.pwd(),
             Commands::HELP => Vfs::help(),
@@ -34,67 +26,67 @@ fn main() {
             Commands::DEFRAG => Err("Not implemented".into()),
 
             Commands::RM => if cmds.len() == 2 {
-                vfs.rm(get(&cmds, 1))
+                vfs.rm(cmds[1].clone())
             } else {
                 Err(format!("Usage: rm [path]").into())
             },
 
             Commands::CD => if cmds.len() == 2 {
-                vfs.cd(get(&cmds, 1))
+                vfs.cd(cmds[1].clone())
             } else {
                 Err(format!("Usage: cd [path]").into())
             },
 
             Commands::CAT => if cmds.len() == 2 {
-                vfs.cat(get(&cmds, 1))
+                vfs.cat(cmds[1].clone())
             } else {
                 Err(format!("Usage: cat [path]").into())
             },
 
             Commands::NANO => if cmds.len() == 2 {
-                vfs.nano(get(&cmds, 1))
+                vfs.nano(cmds[1].clone())
             } else {
                 Err(format!("Usage: nano [path]").into())
             },
 
             Commands::TOUCH => if cmds.len() == 2 {
-                vfs.touch(get(&cmds, 1))
+                vfs.touch(cmds[1].clone())
             } else {
                 Err(format!("Usage: touch [path]").into())
             },
 
             Commands::MKDIR => if cmds.len() == 2 {
-                vfs.mkdir(get(&cmds, 1))
+                vfs.mkdir(cmds[1].clone())
             } else {
                 Err(format!("Usage: mkdir [path]").into())
             },
 
             Commands::RMDIR => if cmds.len() == 2 {
-                vfs.rmdir(get(&cmds, 1))
+                vfs.rmdir(cmds[1].clone())
             } else {
                 Err(format!("Usage: rmdir [path]").into())
             },
 
             Commands::CP => if cmds.len() == 3 {
-                vfs.cp(get(&cmds, 1), get(&cmds, 2))
+                vfs.cp(cmds[1].clone(), cmds[2].clone())
             } else {
                 Err(format!("Usage: cp [from] [to]").into())
             },
 
             Commands::MV => if cmds.len() == 3 {
-                vfs.mv(get(&cmds, 1), get(&cmds, 2))
+                vfs.mv(cmds[1].clone(), cmds[2].clone())
             } else {
                 Err(format!("Usage: mv [from] [to]").into())
             },
 
             Commands::IMPORT => if cmds.len() == 3 {
-                vfs.import(get(&cmds, 1), get(&cmds, 2))
+                vfs.import(cmds[1].clone(), cmds[2].clone())
             } else {
                 Err(format!("Usage: import [from] [to]").into())
             },
 
             Commands::EXPORT => if cmds.len() == 3 {
-                vfs.export(get(&cmds, 1), get(&cmds, 2))
+                vfs.export(cmds[1].clone(), cmds[2].clone())
             } else {
                 Err(format!("Usage: export [from] [to]").into())
             },

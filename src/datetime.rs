@@ -1,50 +1,36 @@
+use chrono::{Utc, Timelike, Datelike};
+
 #[derive(Clone, Copy, Debug)]
-pub struct DateTime {
-    hour: u8,
-    minute: u8,
-    day: u8,
-    month: u8,
-    year: u16
+pub struct VfsDateTime {
+    hour: u32,
+    minute: u32,
+    day: u32,
+    month: u32,
+    year: u32
 }
 
-impl DateTime {
-    pub fn new(hour: u32, minute: u32, day: u32, month: u32, year: u32) -> Self {
-        Self {
-            hour: hour as u8,
-            minute: minute as u8,
-            day: day as u8,
-            month: month as u8,
-            year: year as u16
+impl VfsDateTime {
+    pub fn from_u32(date_time: u32) -> Self {
+        Self { 
+            hour: (date_time >> 9) & 0b11111,
+            minute: (date_time >> 14) & 0b111111,
+            day: (date_time >> 4) & 0b11111,
+            month: date_time & 0b1111,
+            year: date_time >> 20
         }
     }
 
-    pub fn from_u32(date_time: u32) -> Self {
-        let year = (date_time >> 20) as u16;
-        let minute = ((date_time >> 14) & 0b111111) as u8;
-        let hour = ((date_time >> 9) & 0b11111) as u8;
-        let day = ((date_time >> 4) & 0b11111) as u8;
-        let month = (date_time & 0b1111) as u8;
-        
-        Self { hour, minute, day, month, year }
+    pub fn to_u32(&self) -> u32 {
+        (((((((self.year << 6) | self.minute) << 5) | self.hour) << 5) | self.day) << 4) | self.month
     }
 
-    pub fn to_u32(&self) -> u32 {
-        let mut converted: u32 = 0;
-        converted |= self.year as u32;
-        converted <<= 6;
-        converted |= self.minute as u32;
-        converted <<= 5;
-        converted |= self.hour as u32;
-        converted <<= 5;
-        converted |= self.day as u32;
-        converted <<= 4;
-        converted |= self.month as u32;
-
-        converted
+    pub fn from_datetime() -> Self {
+        let dt = Utc::now();
+        Self { hour: dt.hour(), minute: dt.minute(), day: dt.day(), month: dt.month(), year: dt.year() as u32 }
     }
 }
 
-impl std::fmt::Display for DateTime {
+impl std::fmt::Display for VfsDateTime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let month = match self.month {
             1 => "January",
