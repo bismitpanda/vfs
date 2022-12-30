@@ -1,4 +1,4 @@
-import sys, tomlkit, subprocess
+import sys, tomlkit, subprocess, shutil
 
 ver = sys.argv[1]
 
@@ -13,7 +13,7 @@ subprocess.call(["cargo", "build", "--release"])
 with open("target/release/vfs.exe", "rb") as src, open("vfs.exe", "wb") as dst:
     dst.write(src.read())
 
-subprocess.call(["cargo", "clean"])
+shutil.rmtree("target")
 
 with open('test.vfs', 'wb') as vfs:
     vfs.write(b'\x00' * 524292)

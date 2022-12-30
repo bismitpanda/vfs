@@ -5,7 +5,7 @@ use std::{
     fs::{File, OpenOptions},
     os::windows::prelude::FileExt,
     error::Error,
-    collections::{HashMap, BTreeMap, hash_map::Entry::{Occupied, Vacant}},
+    collections::{BTreeMap, btree_map::Entry::{Occupied, Vacant}},
     cmp::Ordering,
     path::{PathBuf, Path, Component}
 };
@@ -71,7 +71,7 @@ struct VfsDirectory {
     date_time: u32,
     #[omit_bounds]
     #[archive_attr(omit_bounds)]
-    entries: HashMap<String, Entry>
+    entries: BTreeMap<String, Entry>
 }
 
 #[derive(Archive, Serialize, Deserialize)]
@@ -81,7 +81,7 @@ struct Root {
     cur_offset: usize,
     #[omit_bounds]
     #[archive_attr(omit_bounds)]
-    entries: HashMap<String, Entry>,
+    entries: BTreeMap<String, Entry>,
     free: BTreeMap<usize, usize>
 }
 
@@ -109,12 +109,12 @@ impl VfsFile {
 }
 
 impl VfsDirectory {
-    fn new(entries: HashMap<String, Entry>, date_time: u32) -> Self {
+    fn new(entries: BTreeMap<String, Entry>, date_time: u32) -> Self {
         Self { entries, date_time }
     }
 
     fn default() -> Self {
-        Self::new(HashMap::new(), 0)
+        Self::new(BTreeMap::new(), 0)
     }
 }
 
@@ -122,7 +122,7 @@ impl Default for Root {
     fn default() -> Self {
         Root {
             cur_offset: 0,
-            entries: HashMap::from([
+            entries: BTreeMap::from([
                 (r"\".to_string(), Entry::Directory(VfsDirectory::default()))
             ]),
             free: BTreeMap::new()
@@ -276,8 +276,7 @@ impl Vfs {
         let mut meta_len_bytes= [0; 8];
         self.file.seek_read(&mut meta_len_bytes, 0)?;
         let meta_len = usize::from_ne_bytes(meta_len_bytes);
-        println!("metabytes hex: {}", hex::encode(meta_len_bytes));
-        println!("metadata length: {}", meta_len);
+
         if meta_len == 0 {
             self.root = Root::default();
             return Ok(());
@@ -588,7 +587,7 @@ impl Vfs {
             path,
             Action::Create(
                 Entry::Directory(
-                    VfsDirectory::new(HashMap::new(), date_time.to_u32())
+                    VfsDirectory::new(BTreeMap::new(), date_time.to_u32())
                 )
             )
         )
