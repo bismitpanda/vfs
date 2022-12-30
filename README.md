@@ -75,8 +75,12 @@ Vfs is a virtual file system (it's also *vfs*) that exposes a linux like console
     - **format**: `export <from> <to>`
     - **description**: Exports a decrypted file from Vfs to the device.
 
+- ### `check`:
+    - **format**: `check`
+    - **description**: Checks the integrity of the stored files.
+
 - ### `defrag`:
     - **format**: `defrag`
     - **description**: Defragments the Vfs and removes the free areas in between.
     - **note**: *Currently this feature is not yet implemented.
-             Expected to be implemented by v2.5.0*
+             Expected to be implemented by v3.1.0*

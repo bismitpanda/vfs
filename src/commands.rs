@@ -17,6 +17,7 @@ pub enum Commands {
     EXPORT,
     DEFRAG,
     HELP,
+    CHECK,
     INVALID,
 }
 
@@ -40,6 +41,7 @@ impl From<&str> for Commands {
             "export" | "exp" => Commands::EXPORT,
             "defrag" | "dfrg" => Commands::DEFRAG,
             "help" | "hlp" | "h" => Commands::HELP,
+            "check" => Commands::CHECK,
             _ => Commands::INVALID
         }
     }

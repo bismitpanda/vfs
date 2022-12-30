@@ -11,7 +11,7 @@ use vfs::Vfs;
 fn main() {
     let mut vfs = Vfs::new("test.vfs".to_string());
     if let Err(err) = vfs.init() {
-        return println!("{err}");
+        return println!("Error occured while initialisation: {err}");
     };
 
     let err = loop {
@@ -25,6 +25,7 @@ fn main() {
             Commands::LS => vfs.ls(),
             Commands::PWD => vfs.pwd(),
             Commands::HELP => Vfs::help(),
+            Commands::CHECK => vfs.check(),
             Commands::EXIT => break vfs.exit(),
             Commands::RESET => break vfs.reset(),
             Commands::DEFRAG => Err("Not implemented".into()),

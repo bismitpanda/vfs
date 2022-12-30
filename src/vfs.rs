@@ -25,6 +25,7 @@ use rkyv::{
     AlignedVec
 };
 
+use sha1::Sha1;
 use snap::raw::{Decoder, Encoder};
 use sha2::{Sha256, Digest};
 use generic_array::GenericArray;
@@ -52,7 +53,8 @@ struct VfsFile {
     length: usize,
     display_length: usize,
     date_time: u32,
-    nonce: [u8; 12]
+    nonce: [u8; 12],
+    checksum: Vec<u8>
 }
 
 #[derive(Archive, Serialize, Deserialize, Clone)]
@@ -87,19 +89,21 @@ pub struct Vfs {
     oracle: AesGcm<Aes256, U12>,
     encoder: Encoder,
     decoder: Decoder,
+    hasher: Sha1,
     root: Root,
     file: File,
     cur_directory: PathBuf
 }
 
 impl VfsFile {
-    fn new(offset: usize, length: usize, nonce: [u8; 12], display_length: usize, date_time: u32) -> Self {
+    fn new(offset: usize, length: usize, nonce: [u8; 12], display_length: usize, date_time: u32, checksum: Vec<u8>) -> Self {
         Self {
             offset,
             length,
             display_length,
             nonce,
-            date_time
+            date_time,
+            checksum
         }
     }
 }
@@ -176,6 +180,7 @@ impl Vfs {
             root: Root::default(),
             encoder: Encoder::new(),
             decoder: Decoder::new(),
+            hasher: Sha1::new(),
             cur_directory: Path::new(r"\").join(""),
             file: OpenOptions::new().write(true).read(true).create(true).open(path).unwrap()
         }
@@ -271,18 +276,20 @@ impl Vfs {
         let mut meta_len_bytes= [0; 8];
         self.file.seek_read(&mut meta_len_bytes, 0)?;
         let meta_len = usize::from_ne_bytes(meta_len_bytes);
-
+        println!("metabytes hex: {}", hex::encode(meta_len_bytes));
+        println!("metadata length: {}", meta_len);
         if meta_len == 0 {
             self.root = Root::default();
             return Ok(());
         }
 
-        let new_buf = &mut vec![u8::MIN; meta_len as usize];
+        let new_buf = &mut vec![0; meta_len];
         self.file.seek_read(new_buf, 8)?;
 
         let nonce = Nonce::from_slice(b"secure nonce");
 
-        let decrypted_buf = match self.oracle.decrypt(&nonce, self.decoder.decompress_vec(new_buf.as_slice())?.as_ref()) {
+        let decompressed = self.decoder.decompress_vec(new_buf.as_slice())?;
+        let decrypted_buf = match self.oracle.decrypt(&nonce, decompressed.as_ref()) {
             Ok(v) => v,
             Err(_) => return Err("Error occured during decryption".into())
         };
@@ -332,6 +339,34 @@ impl Vfs {
 
         Ok(decrypted_buf)
     }
+
+    fn check_file(&mut self, file: VfsFile, path: String) -> Result<(), Box<dyn Error>> {
+        let buf = &mut vec!(0; file.length);
+        self.file.seek_read(buf, file.offset as u64 + HEADER_SIZE + 8)?;
+
+        self.hasher.update(buf.as_slice());
+
+        if file.checksum != self.hasher.finalize_reset().to_vec() {
+            return Err(format!("{}: checksum doesn't match", path).into());
+        }
+
+        Ok(())
+    }
+
+    fn check_dir(&mut self, dir: VfsDirectory, path: String) -> Result<(), Box<dyn Error>> {
+        for (name, entry) in dir.entries {
+            let res = match entry {
+                Entry::File(file) => self.check_file(file, [path.clone(), name].join("/")),
+                Entry::Directory(dir) => self.check_dir(dir, [path.clone(), name].join("/"))
+            };
+
+            if let Err(err) = res {
+                return  Err(err);
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl Vfs {
@@ -362,6 +397,9 @@ impl Vfs {
 
         let enc = self.encrypt(text.as_bytes(), nonce)?;
         let date_time = VfsDateTime::from_datetime();
+        
+        self.hasher.update(&enc);
+        let checksum = self.hasher.finalize_reset().to_vec();
 
         match self.root.free.iter().position(|(&len, _)| enc.len() <= len) {
             Some(key) => {
@@ -372,7 +410,14 @@ impl Vfs {
                     path,
                     Action::Create(
                         Entry::File(
-                            VfsFile::new(offset, len, nonce, text.len(), date_time.to_u32())
+                            VfsFile::new(
+                                offset,
+                                len,
+                                nonce,
+                                text.len(),
+                                date_time.to_u32(),
+                                checksum
+                            )
                         )
                     )
                 )?;
@@ -394,7 +439,8 @@ impl Vfs {
                                 len,
                                 nonce,
                                 text.len(),
-                                date_time.to_u32()
+                                date_time.to_u32(),
+                                checksum
                             )
                         )
                     )
@@ -439,7 +485,7 @@ impl Vfs {
                     to,
                     Action::Create(
                         Entry::File(
-                            VfsFile::new(offset, file.length, file.nonce, file.display_length, date_time.to_u32())
+                            VfsFile::new(offset, file.length, file.nonce, file.display_length, date_time.to_u32(), file.checksum)
                         )
                     )
                 )?;
@@ -456,7 +502,7 @@ impl Vfs {
                     to,
                     Action::Create(
                         Entry::File(
-                            VfsFile::new(self.root.cur_offset, file.length, file.nonce, file.display_length, date_time.to_u32())
+                            VfsFile::new(self.root.cur_offset, file.length, file.nonce, file.display_length, date_time.to_u32(), file.checksum)
                         )
                     )
                 )?;
@@ -579,6 +625,9 @@ impl Vfs {
         let enc = self.encrypt(text.as_slice(), nonce)?;
         let date_time = VfsDateTime::from_datetime();
 
+        self.hasher.update(enc.as_slice());
+        let checksum = self.hasher.finalize_reset().to_vec();
+
         match self.root.free.iter().position(|(&len, _)| enc.len() <= len) {
             Some(key) => {
                 let offset = self.root.free.remove(&key).unwrap();
@@ -588,7 +637,7 @@ impl Vfs {
                     to,
                     Action::Create(
                         Entry::File(
-                            VfsFile::new(offset, len, nonce, text.len(), date_time.to_u32())
+                            VfsFile::new(offset, len, nonce, text.len(), date_time.to_u32(), checksum)
                         )
                     )
                 )?;
@@ -610,7 +659,8 @@ impl Vfs {
                                 len,
                                 nonce,
                                 text.len(),
-                                date_time.to_u32()
+                                date_time.to_u32(),
+                                checksum
                             )
                         )
                     )
@@ -662,6 +712,9 @@ impl Vfs {
 
         let len = enc.len();
 
+        self.hasher.update(&enc);
+        let checksum = self.hasher.finalize_reset().to_vec();
+
         match len.cmp(&file.length) {
             Ordering::Equal => {
                 self.file.seek_write(enc.as_slice(), file.offset as u64 + HEADER_SIZE + 8)?;
@@ -670,7 +723,7 @@ impl Vfs {
                     path,
                     Action::Update(
                         Entry::File(
-                            VfsFile::new(file.offset, file.length, nonce, file.display_length, date_time.to_u32())
+                            VfsFile::new(file.offset, file.length, nonce, file.display_length, date_time.to_u32(), checksum)
                         )
                     )
                 )
@@ -683,7 +736,7 @@ impl Vfs {
                     path,
                     Action::Update(
                         Entry::File(
-                            VfsFile::new(file.offset, len, nonce, text.len(), date_time.to_u32())
+                            VfsFile::new(file.offset, len, nonce, text.len(), date_time.to_u32(), checksum)
                         )
                     )
                 )?;
@@ -711,7 +764,8 @@ impl Vfs {
                                 len,
                                 nonce,
                                 text.len(),
-                                date_time.to_u32()
+                                date_time.to_u32(),
+                                checksum
                             )
                         )
                     )
@@ -722,7 +776,7 @@ impl Vfs {
 
     pub fn help() -> Result<(), Box<dyn Error>> {
         Ok(println!(r#"Very Fast and Secure file system.
-Version: 2.3.4
+Version: 3.0.0
 By: Blood Rogue (github.com/blood-rogue)
 
 Usage: [command] [..options]
@@ -794,12 +848,28 @@ Commands:
         format - export [from] [to]
         description - Exports a decrypted file from Vfs to the device.
 
+    check:
+        format - check
+        description - Checks the integrity of the stored files.
+
     defrag:
         format - defrag
         description - Defragments the Vfs and removes the free areas in between.
         note - Currently this feature is not yet implemented.
-               Expected to be implemented by v2.5.0
+               Expected to be implemented by v3.2.0
 "#))
+    }
+
+    pub fn check(&mut self) -> Result<(), Box<dyn Error>> {
+        let dir = match self.get_path("".to_string()) {
+            Ok(p) => match p {
+                Entry::File(_) => return Err("Current directory is a path which should not be possible.\n\tPlease raise an issue at github.com/blood-rogue/vfs/issues".into()),
+                Entry::Directory(dir) => dir
+            },
+            Err(err) => return Err(format!("Error while getting working directory: {}", err).into())
+        };
+
+        self.check_dir(dir, self.make_path("".to_string()).join("/"))
     }
 }
 
