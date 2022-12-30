@@ -15,9 +15,13 @@ fn main() {
     };
 
     let err = loop {
-        let cmd = scan!(">> ");
+        let cmd = match scan!(">> ") {
+            Ok(s) => s,
+            Err(err) => break Err(err)
+        };
+
         let cmds: Vec<String> = cmd.trim_end().split(' ').map(String::from).collect();
-        let res = match Commands::from(cmds[0].clone()) {
+        let res = match Commands::from(cmds[0].as_str()) {
             Commands::LS => vfs.ls(),
             Commands::PWD => vfs.pwd(),
             Commands::HELP => Vfs::help(),

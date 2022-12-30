@@ -1,4 +1,5 @@
 use chrono::{Utc, Timelike, Datelike};
+use std::fmt::{Display, Formatter, Result};
 
 #[derive(Clone, Copy, Debug)]
 pub struct VfsDateTime {
@@ -30,8 +31,8 @@ impl VfsDateTime {
     }
 }
 
-impl std::fmt::Display for VfsDateTime {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for VfsDateTime {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         let month = match self.month {
             1 => "January",
             2 => "February",
@@ -47,6 +48,6 @@ impl std::fmt::Display for VfsDateTime {
             12 => "December",
             _ => "Invalid Month"
         };
-        write!(f, "{} {} {} {}:{}", self.day, month, self.year, self.hour, self.minute)
+        f.write_fmt(format_args!("{} {} {} {}:{}", self.day, month, self.year, self.hour, self.minute))
     }
 }

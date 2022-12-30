@@ -20,9 +20,9 @@ pub enum Commands {
     INVALID,
 }
 
-impl From<String> for Commands {
-    fn from(cmd: String) -> Self {
-        match cmd.as_str() {
+impl From<&str> for Commands {
+    fn from(cmd: &str) -> Self {
+        match cmd {
             "exit" | "ext" | "e" => Commands::EXIT,
             "touch" | "tch" => Commands::TOUCH,
             "cat" => Commands::CAT,

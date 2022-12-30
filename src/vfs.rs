@@ -36,11 +36,12 @@ macro_rules! scan {
     ($var:expr) => {{
         print!("{}", $var);
         if let Err(err) = std::io::stdout().flush() {
-            panic!("{err}");
-        };
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line).unwrap();
-        line
+            Err::<String, Box<dyn std::error::Error>>(format!("{}", err).into())
+        } else {
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line).unwrap();
+            Ok(line)
+        }
     }}
 }
 
@@ -346,11 +347,11 @@ impl Vfs {
 
     pub fn touch(&mut self, path: String) -> Result<(), Box<dyn Error>> {
         let mut text = String::new();
-        let mut line: String = scan!(".. ");
+        let mut line = scan!(".. ")?;
 
         while !line.trim_end().ends_with("<< EOF") {
             text.push_str(line.as_str());
-            line = scan!(".. ");
+            line = scan!(".. ")?;
         }
 
         line = line.trim_end().to_string();
@@ -643,11 +644,11 @@ impl Vfs {
         };
 
         let mut text = String::new();
-        let mut line: String = scan!(".. ");
+        let mut line = scan!(".. ")?;
 
         while !line.trim_end().ends_with("<< EOF") {
             text.push_str(line.as_str());
-            line = scan!(".. ");
+            line = scan!(".. ")?;
         }
 
         line = line.trim_end().to_string();

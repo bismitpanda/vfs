@@ -1,4 +1,4 @@
-# VFS (***V***ery ***F***ast and ***S***ecure)
+# VFS (*V*ery *F*ast and *S*ecure)
 
 Vfs is a virtual file system (it's also *vfs*) that exposes a linux like console and supports most of the common commands. It stores the files in encrypted and compressed format.
 
