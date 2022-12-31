@@ -8,7 +8,7 @@ with open("Cargo.toml", "r+") as f:
     f.seek(0)
     tomlkit.dump(toml, f)
 
-subprocess.call(["cargo", "build", "--release"])
+subprocess.run(["cargo", "build", "--release"])
 
 with open("target/release/vfs.exe", "rb") as src, open("vfs.exe", "wb") as dst:
     dst.write(src.read())
@@ -19,6 +19,6 @@ with open('test.vfs', 'wb') as vfs:
     vfs.write(b'\x00' * 524292)
 
 
-subprocess.call(["git", "add", "."])
-subprocess.call(["git", "commit", "-m", f"v{ver}"])
-subprocess.call(["git", "push"])
+subprocess.run(["git", "add", "."])
+subprocess.run(["git", "commit", "-m", f"v{ver}"])
+subprocess.run(["git", "push"])

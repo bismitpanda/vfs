@@ -1,6 +1,6 @@
 [package]
 name = "vfs"
-version = "3.0.1"
+version = "3.0.2"
 edition = "2021"
 
 [dependencies]
@@ -8,7 +8,6 @@ aes-gcm = "0.10.1"
 bytecheck = "0.6.9"
 chrono = "0.4.23"
 generic-array = "0.14.6"
-hex = "0.4.3"
 rand = "0.8.5"
 rkyv = { version = "0.7.39", features = ["validation"] }
 rpassword = "7.2.0"
