@@ -9,6 +9,15 @@ It stores the files in encrypted and compressed format.
 - Compressed using [`snappy`](https://github.com/BurntSushi/rust-snappy) compression algorithm.
 - SHA-1 checksums to check file integrity.
 
+## File format (*.vfs)
+| Offset | Hex | Description |
+| ------ | --- | ----------- 
+| 0 | `76 66 73 00` | The magic bytes `vfs\0` |
+| 4 | `00 00 00 00 00 00 00 00` | The length of the meta-data |
+| 12 | `00 00 00 00 00 00 00 00` | The offset of the meta-data |
+
+**Note**: The hex bytes for offsets 4 and 12 are an example and are not fixed. They depend on the contents stored in the file system.
+
 ## Supported Commands
 
 - #### `ls`:

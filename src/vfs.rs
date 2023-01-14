@@ -93,7 +93,7 @@ pub struct Vfs {
     hasher: Sha1,
     root: Root,
     file: IOFile,
-    cur_directory: PathBuf
+    cur_directory: PathBuf,
 }
 
 impl VfsFile {
@@ -126,7 +126,7 @@ impl Default for Root {
             entries: BTreeMap::from([
                 (r"\".to_string(), Directory(VfsDirectory::default()))
             ]),
-            free: BTreeMap::new()
+            free: BTreeMap::new(),
         }
     }
 }
@@ -173,7 +173,7 @@ enum Action {
     Update(Entry)
 }
 
-use crate::vfs::Action::*;
+use crate::vfs::Action::{Create, Delete, Update};
 
 const FILE_DOES_NOT_EXIST: &str = "File doesn't exist";
 const ERROR_DURING_ENC: &str = "Error occured during encryption";
@@ -184,6 +184,15 @@ const OK: Result<(), Box<dyn Error>> = Ok(());
 impl Vfs {
     pub fn new(path: String) -> Self {
         let cipher = Aes256Gcm::new(&get_key());
+        let exists = Path::new(&path).exists();
+        let mut file = OpenOptions::new().write(true).read(true).create(true).open(path.clone()).unwrap();
+
+        if !exists {
+            file.write_all(b"vfs\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0").unwrap();
+            file.flush().unwrap();
+            file.seek(SeekFrom::Start(0)).unwrap();
+        }
+
         Vfs {
             oracle: cipher,
             root: Root::default(),
@@ -191,7 +200,7 @@ impl Vfs {
             decoder: Decoder::new(),
             hasher: Sha1::new(),
             cur_directory: Path::new(r"\").join(""),
-            file: OpenOptions::new().write(true).read(true).create(true).open(path).unwrap()
+            file,
         }
     }
 
@@ -282,9 +291,25 @@ impl Vfs {
     }
 
     pub fn init(&mut self) -> Result<(), Box<dyn Error>> {
+        let len = self.file.metadata()?.len();
+        if len < 20 {
+            return Err(format!("The file provided is corrupt. len: {len}").into());
+        }
+
+        let mut header = [0; 4];
+        let header_size = self.file.read(&mut header)?;
+        
         let mut meta_len_bytes= [0; 8];
-        self.file.read_exact(&mut meta_len_bytes)?;
+        let meta_len_size = self.file.read(&mut meta_len_bytes)?;
         let meta_len = usize::from_ne_bytes(meta_len_bytes);
+
+        let mut meta_off_bytes= [0; 8];
+        let meta_off_size = self.file.read(&mut meta_off_bytes)?;
+        let meta_off = u64::from_ne_bytes(meta_off_bytes);
+
+        if header_size != 4 || header != *b"vfs\0" || meta_len_size != 8 || meta_off_size != 8 {
+            return Err("The file provided is corrupted.".into());
+        }
 
         if meta_len == 0 {
             self.root = Root::default();
@@ -292,7 +317,10 @@ impl Vfs {
         }
 
         let new_buf = &mut vec![0; meta_len];
+        self.file.seek(SeekFrom::Start(meta_off + 20))?;
         self.file.read_exact(new_buf)?;
+
+        self.file.seek(SeekFrom::Start(20))?;
 
         let nonce = Nonce::from_slice(b"secure nonce");
 
@@ -336,7 +364,7 @@ impl Vfs {
 
     fn read_encrypted(&mut self, length: usize, offset: u64, nonce: [u8; 12]) -> Result<Vec<u8>, Box<dyn Error>> {
         let new_buf = &mut vec![0; length];
-        self.file.seek(SeekFrom::Start(offset + HEADER_SIZE + 8))?;
+        self.file.seek(SeekFrom::Start(offset + 20))?;
         self.file.read_exact(new_buf)?;
 
         let nonce = Nonce::from_slice(&nonce);
@@ -351,7 +379,8 @@ impl Vfs {
 
     fn check_file(&mut self, file: VfsFile, path: String) -> Result<(), Box<dyn Error>> {
         let buf = &mut vec!(0; file.length);
-        self.file.seek(SeekFrom::Start(file.offset as u64 + HEADER_SIZE + 8))?;
+
+        self.file.seek(SeekFrom::Start(file.offset as u64 + 20))?;
         self.file.read_exact(buf)?;
 
         self.hasher.update(buf.as_slice());
@@ -387,11 +416,14 @@ impl Vfs {
 
 impl Vfs {
     pub fn exit(&mut self) -> Result<(), Box<dyn Error>> {
-        const SIZE: usize = HEADER_SIZE as usize;
-        let bytes = rkyv::to_bytes::<_, SIZE>(&self.root)?;
+        let bytes = rkyv::to_bytes::<_, 2048>(&self.root)?;
         let enc_bytes = self.encrypt(bytes.as_slice(), *b"secure nonce")?;
-        let len = self.seek_write(&enc_bytes, 8)?;
-        self.seek_write(&len.to_ne_bytes(), 0)?;
+        let len = self.seek_write(&enc_bytes, self.root.cur_offset as u64 + 20)?;
+
+        self.file.seek(SeekFrom::Start(0))?;
+        self.file.write_all(b"vfs\0")?;
+        self.file.write_all(&len.to_ne_bytes())?;
+        self.file.write_all(&self.root.cur_offset.to_ne_bytes())?;
 
         OK
     }
@@ -420,7 +452,7 @@ impl Vfs {
         match self.root.free.iter().position(|(&len, _)| enc.len() <= len) {
             Some(key) => {
                 let offset = self.root.free.remove(&key).unwrap();
-                let len = self.seek_write(enc.as_slice(), offset as u64 + HEADER_SIZE + 8)?;
+                let len = self.seek_write(enc.as_slice(), offset as u64 + 20)?;
 
                 self.set_path(
                     path,
@@ -444,7 +476,7 @@ impl Vfs {
             },
 
             None => {
-                let len = self.seek_write(enc.as_slice(), self.root.cur_offset as u64 + HEADER_SIZE + 8)?;
+                let len = self.seek_write(enc.as_slice(), self.root.cur_offset as u64 + 20)?;
 
                 self.set_path(
                     path,
@@ -489,7 +521,7 @@ impl Vfs {
 
         let buf = &mut vec![0; file.length];
 
-        self.file.seek(SeekFrom::Start((file.offset as u64) + HEADER_SIZE + 8))?;
+        self.file.seek(SeekFrom::Start((file.offset as u64) + 20))?;
         self.file.read_exact(buf)?;
 
         let date_time = VfsDateTime::from_datetime();
@@ -497,7 +529,7 @@ impl Vfs {
         match self.root.free.iter().position(|(&len, _)| file.length <= len) {
             Some(len) => {
                 let offset = self.root.free.remove(&len).unwrap();
-                self.seek_write(&buf.as_slice(), offset as u64 + HEADER_SIZE + 8)?;
+                self.seek_write(&buf.as_slice(), offset as u64 + 20)?;
 
                 self.set_path(
                     to,
@@ -514,7 +546,7 @@ impl Vfs {
             },
 
             None => {
-                self.seek_write(buf.as_slice(), (self.root.cur_offset as u64) + HEADER_SIZE + 8)?;
+                self.seek_write(buf.as_slice(), (self.root.cur_offset as u64) + 20)?;
 
                 self.set_path(
                     to,
@@ -549,7 +581,7 @@ impl Vfs {
         };
 
         let mut buf = vec![0; file.length];
-        self.seek_write(&mut buf, (file.offset as u64) + HEADER_SIZE + 8)?;
+        self.seek_write(&mut buf, (file.offset as u64) + 20)?;
 
         self.set_path(path, Delete)
     }
@@ -565,7 +597,7 @@ impl Vfs {
             _ => 4
         };
 
-        let width = 23;
+        let width = 17;
 
         println!("{:^max$}   {:^max$}   {:^max$}   {:^width$}", "Name", "Type", "Size", "Date");
         println!("{0:-<max$}   {0:-<max$}   {0:-<max$}   {0:-<width$}", "");
@@ -649,7 +681,7 @@ impl Vfs {
         match self.root.free.iter().position(|(&len, _)| enc.len() <= len) {
             Some(key) => {
                 let offset = self.root.free.remove(&key).unwrap();
-                let len = self.seek_write(enc.as_slice(), offset as u64 + HEADER_SIZE + 8)?;
+                let len = self.seek_write(enc.as_slice(), offset as u64 + 20)?;
 
                 self.set_path(
                     to,
@@ -666,7 +698,7 @@ impl Vfs {
             },
 
             None => {
-                let len = self.seek_write(enc.as_slice(), self.root.cur_offset as u64 + HEADER_SIZE + 8)?;
+                let len = self.seek_write(enc.as_slice(), self.root.cur_offset as u64 + 20)?;
 
                 self.set_path(
                     to,
@@ -735,7 +767,7 @@ impl Vfs {
 
         match len.cmp(&file.length) {
             Ordering::Equal => {
-                self.seek_write(enc.as_slice(), file.offset as u64 + HEADER_SIZE + 8)?;
+                self.seek_write(enc.as_slice(), file.offset as u64 + 20)?;
 
                 self.set_path(
                     path,
@@ -748,7 +780,7 @@ impl Vfs {
             },
 
             Ordering::Less => {
-                self.seek_write(enc.as_slice(), file.offset as u64 + HEADER_SIZE + 8)?;
+                self.seek_write(enc.as_slice(), file.offset as u64 + 20)?;
 
                 self.set_path(
                     path,
@@ -760,7 +792,7 @@ impl Vfs {
                 )?;
 
                 let mut buf = vec![0; file.length - len];
-                self.seek_write(&mut buf, file.offset as u64 - len as u64 + HEADER_SIZE + 8)?;
+                self.seek_write(&mut buf, file.offset as u64 - len as u64 + 20)?;
 
                 self.root.free.insert(len - file.length, len);
                 OK
@@ -768,9 +800,9 @@ impl Vfs {
 
             Ordering::Greater => {
                 self.root.free.insert(file.length, file.offset);
-                self.seek_write(vec![0; file.length].as_slice(), file.offset as u64 + HEADER_SIZE + 8)?;
+                self.seek_write(vec![0; file.length].as_slice(), file.offset as u64 + 20)?;
 
-                self.seek_write(enc.as_slice(), self.root.cur_offset as u64 + HEADER_SIZE + 8)?;
+                self.seek_write(enc.as_slice(), self.root.cur_offset as u64 + 20)?;
                 self.root.cur_offset += len;
 
                 self.set_path(
@@ -794,10 +826,10 @@ impl Vfs {
 
     pub fn help() -> Result<(), Box<dyn Error>> {
         Ok(println!(r#"Very Fast and Secure file system.
-Version: 3.0.0
+Version: {}
 By: Blood Rogue (github.com/blood-rogue)
 
-Usage: [command] [..options]
+Usage: {} [command] [..options]
 
 Commands:
     ls:
@@ -848,7 +880,7 @@ Commands:
     touch:
 		format: touch [file_path]
 		description: Creates a file and opens write mode to type your contents.
-                      End the stream by typeing `<< EOF`.
+                     End the stream by typeing `<< EOF`.
 
     mkdir:
 		format: mkdir [dir_path]
@@ -873,9 +905,9 @@ Commands:
     defrag:
 		format: defrag
 		description: Defragments the Vfs and removes the free areas in between.
-        note - Currently this feature is not yet implemented.
-               Expected to be implemented by v3.2.0
-"#))
+        note: Currently this feature is not yet implemented.
+              Expected to be implemented by v3.2.0
+"#, env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")))
     }
 
     pub fn check(&mut self) -> Result<(), Box<dyn Error>> {
@@ -890,5 +922,3 @@ Commands:
         self.check_dir(dir, self.make_path("".to_string()).join("/"))
     }
 }
-
-const HEADER_SIZE: u64 = 524288;
