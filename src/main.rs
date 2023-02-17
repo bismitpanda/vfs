@@ -15,7 +15,7 @@ fn main() {
     };
 
     let err = loop {
-        let cmd = match scan!(">> ") {
+        let cmd = match scan!(">> ", vfs) {
             Ok(s) => s,
             Err(err) => break Err(err)
         };

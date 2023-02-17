@@ -33,8 +33,8 @@ use bytecheck::CheckBytes;
 
 #[macro_export]
 macro_rules! scan {
-    ($var:expr) => {{
-        print!("{}", $var);
+    ($var:expr, $path:tt) => {{
+        print!("[vfs][{}] {}",$path.cur_directory.display(), $var);
         if let Err(err) = std::io::stdout().flush() {
             Err::<String, Box<dyn std::error::Error>>(format!("{}", err).into())
         } else {
@@ -93,7 +93,7 @@ pub struct Vfs {
     hasher: Sha1,
     root: Root,
     file: IOFile,
-    cur_directory: PathBuf,
+    pub cur_directory: PathBuf,
 }
 
 impl VfsFile {
@@ -298,7 +298,7 @@ impl Vfs {
 
         let mut header = [0; 4];
         let header_size = self.file.read(&mut header)?;
-        
+
         let mut meta_len_bytes= [0; 8];
         let meta_len_size = self.file.read(&mut meta_len_bytes)?;
         let meta_len = usize::from_ne_bytes(meta_len_bytes);
@@ -430,11 +430,11 @@ impl Vfs {
 
     pub fn touch(&mut self, path: String) -> Result<(), Box<dyn Error>> {
         let mut text = String::new();
-        let mut line = scan!(".. ")?;
+        let mut line = scan!(".. ", self)?;
 
         while !line.trim_end().ends_with("<< EOF") {
             text.push_str(line.as_str());
-            line = scan!(".. ")?;
+            line = scan!(".. ", self)?;
         }
 
         line = line.trim_end().to_string();
@@ -445,7 +445,7 @@ impl Vfs {
 
         let enc = self.encrypt(text.as_bytes(), nonce)?;
         let date_time = VfsDateTime::from_datetime();
-        
+
         self.hasher.update(&enc);
         let checksum = self.hasher.finalize_reset().to_vec();
 
@@ -744,11 +744,11 @@ impl Vfs {
         };
 
         let mut text = String::new();
-        let mut line = scan!(".. ")?;
+        let mut line = scan!(".. ", self)?;
 
         while !line.trim_end().ends_with("<< EOF") {
             text.push_str(line.as_str());
-            line = scan!(".. ")?;
+            line = scan!(".. ", self)?;
         }
 
         line = line.trim_end().to_string();
