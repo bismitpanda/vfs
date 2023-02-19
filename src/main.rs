@@ -1,4 +1,6 @@
 use std::io::Write;
+use colored::*;
+
 mod datetime;
 use crate::datetime::VfsDateTime;
 
@@ -33,70 +35,70 @@ fn main() {
             Commands::RM => if cmds.len() == 2 {
                 vfs.rm(cmds[1].clone())
             } else {
-                Err(format!("Usage: rm [path]").into())
+                Err(format!("{}", "Usage: rm [path]".cyan()).into())
             },
 
             Commands::CD => if cmds.len() == 2 {
                 vfs.cd(cmds[1].clone())
             } else {
-                Err(format!("Usage: cd [path]").into())
+                Err(format!("{}", "Usage: cd [path]".cyan()).into())
             },
 
             Commands::CAT => if cmds.len() == 2 {
                 vfs.cat(cmds[1].clone())
             } else {
-                Err(format!("Usage: cat [path]").into())
+                Err(format!("{}", "Usage: cat [path]".cyan()).into())
             },
 
             Commands::NANO => if cmds.len() == 2 {
                 vfs.nano(cmds[1].clone())
             } else {
-                Err(format!("Usage: nano [path]").into())
+                Err(format!("{}", "Usage: nano [path]".cyan()).into())
             },
 
             Commands::TOUCH => if cmds.len() == 2 {
                 vfs.touch(cmds[1].clone())
             } else {
-                Err(format!("Usage: touch [path]").into())
+                Err(format!("{}", "Usage: touch [path]".cyan()).into())
             },
 
             Commands::MKDIR => if cmds.len() == 2 {
                 vfs.mkdir(cmds[1].clone())
             } else {
-                Err(format!("Usage: mkdir [path]").into())
+                Err(format!("{}", "Usage: mkdir [path]".cyan()).into())
             },
 
             Commands::RMDIR => if cmds.len() == 2 {
                 vfs.rmdir(cmds[1].clone())
             } else {
-                Err(format!("Usage: rmdir [path]").into())
+                Err(format!("{}", "Usage: rmdir [path]".cyan()).into())
             },
 
             Commands::CP => if cmds.len() == 3 {
                 vfs.cp(cmds[1].clone(), cmds[2].clone())
             } else {
-                Err(format!("Usage: cp [from] [to]").into())
+                Err(format!("{}", "Usage: cp [from] [to]".cyan()).into())
             },
 
             Commands::MV => if cmds.len() == 3 {
                 vfs.mv(cmds[1].clone(), cmds[2].clone())
             } else {
-                Err(format!("Usage: mv [from] [to]").into())
+                Err(format!("{}", "Usage: mv [from] [to]".cyan()).into())
             },
 
             Commands::IMPORT => if cmds.len() == 3 {
                 vfs.import(cmds[1].clone(), cmds[2].clone())
             } else {
-                Err(format!("Usage: import [from] [to]").into())
+                Err(format!("{}", "Usage: import [from] [to]".cyan()).into())
             },
 
             Commands::EXPORT => if cmds.len() == 3 {
                 vfs.export(cmds[1].clone(), cmds[2].clone())
             } else {
-                Err(format!("Usage: export [from] [to]").into())
+                Err(format!("{}", "Usage: export [from] [to]".cyan()).into())
             },
 
-            Commands::INVALID => Ok(println!("Invalid command entered `{}`", cmds[0])),
+            Commands::INVALID => Ok(println!("{}", format!("Invalid command entered `{}`", cmds[0]).red())),
         };
 
         if let Err(err) = res {

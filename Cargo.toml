@@ -1,12 +1,13 @@
 [package]
 name = "vfs"
-version = "4.0.1"
+version = "4.1.0"
 edition = "2021"
 
 [dependencies]
 aes-gcm = "0.10.1"
 bytecheck = "0.6.9"
 chrono = "0.4.23"
+colored = "2.0.0"
 generic-array = "0.14.6"
 rand = "0.8.5"
 rkyv = { version = "0.7.39", features = ["validation"] }

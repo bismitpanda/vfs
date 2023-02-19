@@ -30,11 +30,12 @@ use sha2::{Sha256, Digest};
 use generic_array::GenericArray;
 use typenum::{U12, U32};
 use bytecheck::CheckBytes;
+use colored::*;
 
 #[macro_export]
 macro_rules! scan {
     ($var:expr, $path:tt) => {{
-        print!("[vfs][{}] {}",$path.cur_directory.display(), $var);
+        print!("{} {}", format!("[vfs][{}]", $path.cur_directory.display().to_string()).yellow(), $var);
         if let Err(err) = std::io::stdout().flush() {
             Err::<String, Box<dyn std::error::Error>>(format!("{}", err).into())
         } else {
@@ -133,10 +134,7 @@ impl Default for Root {
 
 fn get_key() -> GenericArray<u8, U32> {
     let key = rpassword::prompt_password("Your key: ").unwrap();
-    let mut hasher = Sha256::new();
-    hasher.update(key.as_bytes());
-
-    let cipher_key = hasher.finalize();
+    let cipher_key = Sha256::digest(key.as_bytes());
 
     return cipher_key;
 }
@@ -152,18 +150,15 @@ fn normalize_path(path: &Path) -> PathBuf {
 
     for component in components {
         match component {
-            Component::RootDir => {
-                ret.push(component.as_os_str());
-            },
+            Component::RootDir => ret.push(component.as_os_str()),
             Component::ParentDir => {
                 ret.pop();
             },
-            Component::Normal(c) => {
-                ret.push(c);
-            },
+            Component::Normal(c) => ret.push(c),
             _ => {}
         }
     }
+
     ret
 }
 
@@ -251,7 +246,7 @@ impl Vfs {
             }
         }
 
-        let date_time = VfsDateTime::from_datetime();
+        let date_time = VfsDateTime::from_datetime().to_u32();
 
         if let Directory(dir) = entry {
             match action {
@@ -259,7 +254,7 @@ impl Vfs {
                     match dir.entries.entry(last.clone()) {
                         Occupied(_) => return Err("Entry already exists.".into()),
                         Vacant(entry) => {
-                            dir.date_time = date_time.to_u32();
+                            dir.date_time = date_time;
                             entry.insert(action_entry)
                         }
                     };
@@ -268,7 +263,7 @@ impl Vfs {
                 Delete => {
                     match dir.entries.entry(last.clone()) {
                         Occupied( entry) => {
-                            dir.date_time = date_time.to_u32();
+                            dir.date_time = date_time;
                             entry.remove()
                         },
                         Vacant(_) => return Err(FILE_DOES_NOT_EXIST.into())
@@ -278,7 +273,7 @@ impl Vfs {
                 Update(action_entry) => {
                     match dir.entries.entry(last.clone()) {
                         Occupied(mut entry) => {
-                            dir.date_time = date_time.to_u32();
+                            dir.date_time = date_time;
                             entry.insert(action_entry)
                         },
                         Vacant(_) => return Err(FILE_DOES_NOT_EXIST.into())
@@ -444,7 +439,7 @@ impl Vfs {
         let nonce: [u8; 12] = rand::random();
 
         let enc = self.encrypt(text.as_bytes(), nonce)?;
-        let date_time = VfsDateTime::from_datetime();
+        let date_time = VfsDateTime::from_datetime().to_u32();
 
         self.hasher.update(&enc);
         let checksum = self.hasher.finalize_reset().to_vec();
@@ -463,7 +458,7 @@ impl Vfs {
                                 len,
                                 nonce,
                                 text.len(),
-                                date_time.to_u32(),
+                                date_time,
                                 checksum
                             )
                         )
@@ -487,7 +482,7 @@ impl Vfs {
                                 len,
                                 nonce,
                                 text.len(),
-                                date_time.to_u32(),
+                                date_time,
                                 checksum
                             )
                         )
@@ -524,7 +519,7 @@ impl Vfs {
         self.file.seek(SeekFrom::Start((file.offset as u64) + 20))?;
         self.file.read_exact(buf)?;
 
-        let date_time = VfsDateTime::from_datetime();
+        let date_time = VfsDateTime::from_datetime().to_u32();
 
         match self.root.free.iter().position(|(&len, _)| file.length <= len) {
             Some(len) => {
@@ -535,7 +530,11 @@ impl Vfs {
                     to,
                     Create(
                         File(
-                            VfsFile::new(offset, file.length, file.nonce, file.display_length, date_time.to_u32(), file.checksum)
+                            VfsFile {
+                                offset,
+                                date_time,
+                                ..file
+                            }
                         )
                     )
                 )?;
@@ -552,7 +551,11 @@ impl Vfs {
                     to,
                     Create(
                         File(
-                            VfsFile::new(self.root.cur_offset, file.length, file.nonce, file.display_length, date_time.to_u32(), file.checksum)
+                            VfsFile {
+                                offset: self.root.cur_offset,
+                                date_time,
+                                ..file
+                            }
                         )
                     )
                 )?;
@@ -577,7 +580,7 @@ impl Vfs {
     pub fn rm(&mut self, path: String) -> Result<(), Box<dyn Error>> {
         let file = match self.get_path(path.clone())? {
             File(file) => file,
-            Directory(_) => return Err(format!("`{path}` is not a file. use `rmdir` instead.").into())
+            Directory(_) => return Err(format!("`{path}` is not a file.\n{}", "Use `rmdir` instead.".green()).into())
         };
 
         let mut buf = vec![0; file.length];
@@ -592,20 +595,29 @@ impl Vfs {
             File(_) => return Err(format!("Working directory is not a file").into())
         };
 
-        let max = match directory.entries.keys().map(String::len).max() {
+        let dir_name_max = match directory.entries.keys().map(String::len).max() {
             Some(max) if max > 4 => max,
             _ => 4
         };
 
         let width = 17;
+        let max = match directory.entries.values().map(|val| {
+            match val {
+                Directory(dir) => dir.entries.len(),
+                File(f) => f.display_length
+            }
+        }).max() {
+            Some(m) if m > 9999 => m.to_string().len(),
+            _ => 4
+        };
 
-        println!("{:^max$}   {:^max$}   {:^max$}   {:^width$}", "Name", "Type", "Size", "Date");
-        println!("{0:-<max$}   {0:-<max$}   {0:-<max$}   {0:-<width$}", "");
+        println!("{:^dir_name_max$}   Type   {:^max$}   {:^width$}", "Name", "Size", "Date");
+        println!("{0:-<dir_name_max$}   ----   {0:-<max$}   {0:-<width$}", "");
 
         for (path, entry) in &directory.entries {
             match entry {
-                File(file) => println!("{path:max$}   File   {:^max$}   {:^width$}", file.display_length, VfsDateTime::from_u32(file.date_time)),
-                Directory(directory) => println!("{path:max$}   Dir    {:^max$}   {:^width$}", directory.entries.len(), VfsDateTime::from_u32(directory.date_time))
+                File(file) => println!("{path:dir_name_max$}   File   {:^max$}   {:^width$}", file.display_length, VfsDateTime::from_u32(file.date_time)),
+                Directory(dir) => println!("{path:dir_name_max$}   Dir    {:^max$}   {:^width$}", dir.entries.len(), VfsDateTime::from_u32(dir.date_time))
             }
         }
 
@@ -632,13 +644,11 @@ impl Vfs {
     }
 
     pub fn mkdir(&mut self, path: String) -> Result<(), Box<dyn Error>> {
-        let date_time = VfsDateTime::from_datetime();
-
         self.set_path(
             path,
             Create(
                 Directory(
-                    VfsDirectory::new(BTreeMap::new(), date_time.to_u32())
+                    VfsDirectory::new(BTreeMap::new(), VfsDateTime::from_datetime().to_u32())
                 )
             )
         )
@@ -673,7 +683,7 @@ impl Vfs {
         let nonce: [u8; 12] = rand::random();
 
         let enc = self.encrypt(text.as_slice(), nonce)?;
-        let date_time = VfsDateTime::from_datetime();
+        let date_time = VfsDateTime::from_datetime().to_u32();
 
         self.hasher.update(enc.as_slice());
         let checksum = self.hasher.finalize_reset().to_vec();
@@ -687,7 +697,7 @@ impl Vfs {
                     to,
                     Create(
                         File(
-                            VfsFile::new(offset, len, nonce, text.len(), date_time.to_u32(), checksum)
+                            VfsFile::new(offset, len, nonce, text.len(), date_time, checksum)
                         )
                     )
                 )?;
@@ -709,7 +719,7 @@ impl Vfs {
                                 len,
                                 nonce,
                                 text.len(),
-                                date_time.to_u32(),
+                                date_time,
                                 checksum
                             )
                         )
@@ -758,7 +768,7 @@ impl Vfs {
         let nonce: [u8; 12] = rand::random();
 
         let enc = self.encrypt(text.as_bytes(), nonce)?;
-        let date_time = VfsDateTime::from_datetime();
+        let date_time = VfsDateTime::from_datetime().to_u32();
 
         let len = enc.len();
 
@@ -773,7 +783,12 @@ impl Vfs {
                     path,
                     Update(
                         File(
-                            VfsFile::new(file.offset, file.length, nonce, file.display_length, date_time.to_u32(), checksum)
+                            VfsFile {
+                                nonce,
+                                date_time,
+                                checksum,
+                                ..file
+                            }
                         )
                     )
                 )
@@ -786,7 +801,7 @@ impl Vfs {
                     path,
                     Update(
                         File(
-                            VfsFile::new(file.offset, len, nonce, text.len(), date_time.to_u32(), checksum)
+                            VfsFile::new(file.offset, len, nonce, text.len(), date_time, checksum)
                         )
                     )
                 )?;
@@ -814,7 +829,7 @@ impl Vfs {
                                 len,
                                 nonce,
                                 text.len(),
-                                date_time.to_u32(),
+                                date_time,
                                 checksum
                             )
                         )
@@ -825,7 +840,7 @@ impl Vfs {
     }
 
     pub fn help() -> Result<(), Box<dyn Error>> {
-        Ok(println!(r#"Very Fast and Secure file system.
+        Ok(println!("{}", format!(r#"Very Fast and Secure file system.
 Version: {}
 By: Blood Rogue (github.com/blood-rogue)
 
@@ -907,7 +922,7 @@ Commands:
 		description: Defragments the Vfs and removes the free areas in between.
         note: Currently this feature is not yet implemented.
               Expected to be implemented by v3.2.0
-"#, env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")))
+"#, env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")).green()))
     }
 
     pub fn check(&mut self) -> Result<(), Box<dyn Error>> {
