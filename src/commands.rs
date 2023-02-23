@@ -1,4 +1,3 @@
-#[derive(PartialEq, Eq)]
 pub enum Commands {
     EXIT,
     TOUCH,

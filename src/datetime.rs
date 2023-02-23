@@ -1,7 +1,6 @@
 use chrono::{Utc, Timelike, Datelike};
 use std::fmt::{Display, Formatter, Result};
 
-#[derive(Clone, Copy, Debug)]
 pub struct VfsDateTime {
     hour: u32,
     minute: u32,
@@ -10,25 +9,25 @@ pub struct VfsDateTime {
     year: u32
 }
 
-impl VfsDateTime {
-    pub fn from_u32(date_time: u32) -> Self {
-        Self { 
-            hour: (date_time >> 9) & 0b11111,
-            minute: (date_time >> 14) & 0b111111,
-            day: (date_time >> 4) & 0b11111,
-            month: date_time & 0b1111,
-            year: date_time >> 20
+pub trait ToDateTime {
+    fn parse_dt(self) -> VfsDateTime;
+}
+
+impl ToDateTime for u32 {
+    fn parse_dt(self) -> VfsDateTime {
+        VfsDateTime {
+            year: self >> 20,
+            minute: (self >> 14) & 0b111111,
+            hour: (self >> 9) & 0b11111,
+            day: (self >> 4) & 0b11111,
+            month: self & 0b1111
         }
     }
+}
 
-    pub fn to_u32(&self) -> u32 {
-        (((((((self.year << 6) | self.minute) << 5) | self.hour) << 5) | self.day) << 4) | self.month
-    }
-
-    pub fn from_datetime() -> Self {
-        let dt = Utc::now();
-        Self { hour: dt.hour(), minute: dt.minute(), day: dt.day(), month: dt.month(), year: dt.year() as u32 }
-    }
+pub fn now() -> u32 {
+    let cur_time = Utc::now();
+    ((((((((cur_time.year() as u32) << 6) | cur_time.minute()) << 5) | cur_time.hour()) << 5) | cur_time.day()) << 4) | cur_time.month()
 }
 
 impl Display for VfsDateTime {

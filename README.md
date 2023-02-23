@@ -8,7 +8,7 @@ It stores the files in encrypted and compressed format.
 - Linux like commands.
 - Encrypted with `aes-256-gcm` with key provided by user.
 - Compressed using [`snappy`](https://github.com/BurntSushi/rust-snappy) compression algorithm.
-- SHA-1 checksums to check file integrity.
+- SHA-2 checksums to check file integrity.
 
 ## File format (*.vfs)
 
@@ -29,22 +29,22 @@ It stores the files in encrypted and compressed format.
 
 - ### `rm`
 
-  - **usage**: `rm <file_path>`
+  - **usage**: `rm <file path>`
   - **description**: Remove a file with the path specified.
 
 - ### `cd`
 
-  - **usage**: `cd <folder_path>`
+  - **usage**: `cd <folder path>`
   - **description**: Change the current working directory to the path specified.
 
 - ### `cp`
 
-  - **usage**: `cp <from> <to>`
+  - **usage**: `cp <from path> <to path>`
   - **description**: Copy a file from one location to another.
 
 - ### `mv`
 
-  - **usage**: `mv <from> <to>`
+  - **usage**: `mv <from path> <to path>`
   - **description**: Moves a file from one path to another.
                      Can also be used to rename
 
@@ -55,7 +55,7 @@ It stores the files in encrypted and compressed format.
 
 - ### `cat`
 
-  - **usage**: `cat <file_path>`
+  - **usage**: `cat <file path>`
   - **description**: Prints the contents of a file to the console.
 
 - ### `help`
@@ -70,7 +70,7 @@ It stores the files in encrypted and compressed format.
 
 - ### `nano`
 
-  - **usage**: `nano <file_path>`
+  - **usage**: `nano <file path>`
   - **description**: Edits the contents of the file with the given path.
 
 - ### `reset`
@@ -80,7 +80,7 @@ It stores the files in encrypted and compressed format.
 
 - ### `touch`
 
-  - **usage**: `touch <file_path>`
+  - **usage**: `touch <file path>`
   - **description**: Creates a file and opens write mode to type your contents.
           End the stream by typeing `<< EOF`.
 
@@ -96,12 +96,12 @@ It stores the files in encrypted and compressed format.
 
 - ### `import`
 
-  - **usage**: `import <from> <to>`
+  - **usage**: `import <from path> <to path>`
   - **description**: Imports a file from the device and adds it to the Vfs.
 
 - ### `export`
 
-  - **usage**: `export <from> <to>`
+  - **usage**: `export <from path> <to path>`
   - **description**: Exports a decrypted file from Vfs to the device.
 
 - ### `check`

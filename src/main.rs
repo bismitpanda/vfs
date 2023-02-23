@@ -1,14 +1,12 @@
+mod datetime;
+mod commands;
+mod vfs;
+
+use commands::Commands;
+use vfs::Vfs;
+
 use std::io::Write;
 use colored::*;
-
-mod datetime;
-use crate::datetime::VfsDateTime;
-
-mod commands;
-use crate::commands::Commands;
-
-mod vfs;
-use vfs::Vfs;
 
 fn main() {
     let mut vfs = Vfs::new("test.vfs".to_string());

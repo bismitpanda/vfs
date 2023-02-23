@@ -13,11 +13,7 @@ subprocess.run(["cargo", "build", "--release"])
 with open("target/release/vfs.exe", "rb") as src, open("vfs.exe", "wb") as dst:
     dst.write(src.read())
 
-shutil.rmtree("target")
-
-with open('test.vfs', 'wb') as vfs:
-    vfs.write(b'\x00' * 524292)
-
+shutil.rmtree("target/release")
 
 subprocess.run(["git", "add", "."])
 subprocess.run(["git", "commit", "-m", f"v{ver}"])
