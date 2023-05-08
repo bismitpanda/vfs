@@ -1,4 +1,4 @@
-use chrono::{Utc, Timelike, Datelike};
+use chrono::{Datelike, Timelike, Utc};
 use std::fmt::{Display, Formatter, Result};
 
 pub struct VfsDateTime {
@@ -6,7 +6,7 @@ pub struct VfsDateTime {
     minute: u32,
     day: u32,
     month: u32,
-    year: u32
+    year: u32,
 }
 
 pub trait ToDateTime {
@@ -20,14 +20,17 @@ impl ToDateTime for u32 {
             minute: (self >> 14) & 0b111111,
             hour: (self >> 9) & 0b11111,
             day: (self >> 4) & 0b11111,
-            month: self & 0b1111
+            month: self & 0b1111,
         }
     }
 }
 
 pub fn now() -> u32 {
     let cur_time = Utc::now();
-    ((((((((cur_time.year() as u32) << 6) | cur_time.minute()) << 5) | cur_time.hour()) << 5) | cur_time.day()) << 4) | cur_time.month()
+    ((((((((cur_time.year() as u32) << 6) | cur_time.minute()) << 5) | cur_time.hour()) << 5)
+        | cur_time.day())
+        << 4)
+        | cur_time.month()
 }
 
 impl Display for VfsDateTime {
@@ -45,8 +48,11 @@ impl Display for VfsDateTime {
             10 => "Oct",
             11 => "Nov",
             12 => "Dec",
-            _ => "Invalid Month"
+            _ => "Invalid Month",
         };
-        f.write_fmt(format_args!("{} {} {} {}:{}", self.day, month, self.year, self.hour, self.minute))
+        f.write_fmt(format_args!(
+            "{} {} {} {}:{}",
+            self.day, month, self.year, self.hour, self.minute
+        ))
     }
 }

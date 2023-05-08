@@ -1,39 +1,40 @@
-use crate::datetime::ToDateTime;
 use crate::datetime;
+use crate::datetime::ToDateTime;
 
 use std::{
-    io::{Write, Read, Seek, SeekFrom},
-    fs::{File, OpenOptions},
-    error::Error,
-    collections::{BTreeMap, btree_map::Entry::{Occupied, Vacant}},
     cmp::Ordering,
-    path::{PathBuf, Path, Component}
+    collections::{
+        btree_map::Entry::{Occupied, Vacant},
+        BTreeMap,
+    },
+    error::Error,
+    fs::{File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
+    path::{Component, Path, PathBuf},
 };
 
 use aes_gcm::{
     aead::{Aead, KeyInit},
-    Aes256Gcm,
-    Nonce
+    Aes256Gcm, Nonce,
 };
 
-use rkyv::{
-    Archive,
-    Deserialize,
-    Serialize,
-    AlignedVec
-};
+use rkyv::{AlignedVec, Archive, Deserialize, Serialize};
 
-use snap::raw::{Decoder, Encoder};
-use sha2::{Sha256, Digest};
-use generic_array::GenericArray;
-use typenum::U32;
 use bytecheck::CheckBytes;
 use colored::*;
+use generic_array::GenericArray;
+use sha2::{Digest, Sha256};
+use snap::raw::{Decoder, Encoder};
+use typenum::U32;
 
 #[macro_export]
 macro_rules! scan {
     ($var:expr, $vfs:ident) => {{
-        print!("{} {}", format!("[vfs][{}]", $vfs.cur_directory.display().to_string()).yellow(), $var);
+        print!(
+            "{} {}",
+            format!("[vfs][{}]", $vfs.cur_directory.display().to_string()).yellow(),
+            $var
+        );
         if let Err(err) = std::io::stdout().flush() {
             Err::<String, Box<dyn std::error::Error>>(format!("{}", err).into())
         } else {
@@ -41,7 +42,7 @@ macro_rules! scan {
             std::io::stdin().read_line(&mut line).unwrap();
             Ok(line)
         }
-    }}
+    }};
 }
 
 #[derive(Archive, Serialize, Deserialize, Clone)]
@@ -52,35 +53,45 @@ struct VfsFile {
     display_length: usize,
     date_time: u32,
     nonce: [u8; 12],
-    checksum: Vec<u8>
+    checksum: Vec<u8>,
 }
 
 #[derive(Archive, Serialize, Deserialize, Clone)]
 #[archive_attr(derive(CheckBytes))]
 enum VfsEntry {
     File(VfsFile),
-    Directory(VfsDirectory)
+    Directory(VfsDirectory),
 }
 
 #[derive(Archive, Serialize, Deserialize, Clone)]
 #[archive(bound(serialize = "__S: rkyv::ser::ScratchSpace + rkyv::ser::Serializer"))]
-#[archive_attr(derive(CheckBytes),check_bytes(bound = "__C: rkyv::validation::ArchiveContext, <__C as rkyv::Fallible>::Error: std::error::Error"))]
+#[archive_attr(
+    derive(CheckBytes),
+    check_bytes(
+        bound = "__C: rkyv::validation::ArchiveContext, <__C as rkyv::Fallible>::Error: std::error::Error"
+    )
+)]
 struct VfsDirectory {
     date_time: u32,
     #[omit_bounds]
     #[archive_attr(omit_bounds)]
-    entries: BTreeMap<String, VfsEntry>
+    entries: BTreeMap<String, VfsEntry>,
 }
 
 #[derive(Archive, Serialize, Deserialize)]
 #[archive(bound(serialize = "__S: rkyv::ser::ScratchSpace + rkyv::ser::Serializer"))]
-#[archive_attr(derive(CheckBytes),check_bytes(bound = "__C: rkyv::validation::ArchiveContext, <__C as rkyv::Fallible>::Error: std::error::Error"))]
+#[archive_attr(
+    derive(CheckBytes),
+    check_bytes(
+        bound = "__C: rkyv::validation::ArchiveContext, <__C as rkyv::Fallible>::Error: std::error::Error"
+    )
+)]
 struct Root {
     cur_offset: usize,
     #[omit_bounds]
     #[archive_attr(omit_bounds)]
     entries: BTreeMap<String, VfsEntry>,
-    free: BTreeMap<usize, usize>
+    free: BTreeMap<usize, usize>,
 }
 
 pub struct Vfs {
@@ -94,14 +105,21 @@ pub struct Vfs {
 }
 
 impl VfsFile {
-    fn new(offset: usize, length: usize, nonce: [u8; 12], display_length: usize, date_time: u32, checksum: Vec<u8>) -> Self {
+    fn new(
+        offset: usize,
+        length: usize,
+        nonce: [u8; 12],
+        display_length: usize,
+        date_time: u32,
+        checksum: Vec<u8>,
+    ) -> Self {
         Self {
             offset,
             length,
             display_length,
             nonce,
             date_time,
-            checksum
+            checksum,
         }
     }
 }
@@ -120,9 +138,10 @@ impl Default for Root {
     fn default() -> Self {
         Root {
             cur_offset: 0,
-            entries: BTreeMap::from([
-                (r"\".to_string(), VfsEntry::Directory(VfsDirectory::default()))
-            ]),
+            entries: BTreeMap::from([(
+                r"\".to_string(),
+                VfsEntry::Directory(VfsDirectory::default()),
+            )]),
             free: BTreeMap::new(),
         }
     }
@@ -149,7 +168,7 @@ fn normalize_path(path: &Path) -> PathBuf {
             Component::RootDir => ret.push(component.as_os_str()),
             Component::ParentDir => {
                 ret.pop();
-            },
+            }
             Component::Normal(c) => ret.push(c),
             _ => {}
         }
@@ -161,7 +180,7 @@ fn normalize_path(path: &Path) -> PathBuf {
 enum Action {
     Create(VfsEntry),
     Delete,
-    Update(VfsEntry)
+    Update(VfsEntry),
 }
 
 use crate::vfs::Action::{Create, Delete, Update};
@@ -176,12 +195,22 @@ const OK: Result<(), Box<dyn Error>> = Ok(());
 impl Vfs {
     pub fn new(path: String) -> Self {
         let exists = Path::new(&path).exists();
-        let mut file = OpenOptions::new().write(true).read(true).create(true).open(path.clone()).unwrap();
+        let mut file = OpenOptions::new()
+            .write(true)
+            .read(true)
+            .create(true)
+            .open(path.clone())
+            .unwrap();
 
-        let cipher = Aes256Gcm::new(&get_key(if exists { "Your key" } else { "Enter a new key: " }));
+        let cipher = Aes256Gcm::new(&get_key(if exists {
+            "Your key"
+        } else {
+            "Enter a new key: "
+        }));
 
         if !exists {
-            file.write_all(b"vfs\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0").unwrap();
+            file.write_all(b"vfs\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0")
+                .unwrap();
             file.flush().unwrap();
             file.seek(SeekFrom::Start(0)).unwrap();
         }
@@ -208,9 +237,9 @@ impl Vfs {
                         Some(e) => e.clone(),
                         None => return Err(format!("Directory `{part}` not found.").into()),
                     }
-                },
+                }
 
-                VfsEntry::File(_) => return Err(format!("`{part}` is not a directory").into())
+                VfsEntry::File(_) => return Err(format!("`{part}` is not a directory").into()),
             }
         }
 
@@ -219,23 +248,21 @@ impl Vfs {
 
     fn set_path(&mut self, cur_path: String, action: Action) -> Result<(), Box<dyn Error>> {
         let path = self.make_path(cur_path);
-        let mut entry = self.root.entries.entry(path[0].clone()).or_insert(
-            VfsEntry::Directory(
-                VfsDirectory::default()
-            )
-        );
+        let mut entry = self
+            .root
+            .entries
+            .entry(path[0].clone())
+            .or_insert(VfsEntry::Directory(VfsDirectory::default()));
 
         let (last, parts) = path[1..].split_last().unwrap();
         for part in parts {
             match entry.clone() {
-                VfsEntry::Directory(dir) => {
-                    match dir.entries.get(part) {
-                        Some(e) => e.clone_into(&mut entry),
-                        None => return Err(format!("Directory `{part}` not found.").into()),
-                    }
+                VfsEntry::Directory(dir) => match dir.entries.get(part) {
+                    Some(e) => e.clone_into(&mut entry),
+                    None => return Err(format!("Directory `{part}` not found.").into()),
                 },
 
-                VfsEntry::File(_) => return Err(format!("`{part}` is not a directory").into())
+                VfsEntry::File(_) => return Err(format!("`{part}` is not a directory").into()),
             }
         }
 
@@ -245,31 +272,44 @@ impl Vfs {
             match action {
                 Create(action_entry) => {
                     match dir.entries.entry(last.clone()) {
-                        Occupied(entry) => return Err((if let VfsEntry::File(_) = entry.get() { "File already exists." } else { "Folder already exists." }).into()),
+                        Occupied(entry) => {
+                            return Err((if let VfsEntry::File(_) = entry.get() {
+                                "File already exists."
+                            } else {
+                                "Folder already exists."
+                            })
+                            .into())
+                        }
                         Vacant(entry) => {
                             dir.date_time = date_time;
                             entry.insert(action_entry)
                         }
                     };
-                },
+                }
 
                 Delete => {
                     match dir.entries.entry(last.clone()) {
                         Occupied(entry) => {
                             dir.date_time = date_time;
                             entry.remove()
-                        },
-                        Vacant(_) => return Err("Entry doesn't exist".into())
+                        }
+                        Vacant(_) => return Err("Entry doesn't exist".into()),
                     };
-                },
+                }
 
                 Update(action_entry) => {
                     match dir.entries.entry(last.clone()) {
                         Occupied(mut entry) => {
                             dir.date_time = date_time;
                             entry.insert(action_entry)
-                        },
-                        Vacant(_) => return Err(if let VfsEntry::File(_) = action_entry { FILE_DOES_NOT_EXIST.into() } else { FOLDER_DOES_NOT_EXIST.into() })
+                        }
+                        Vacant(_) => {
+                            return Err(if let VfsEntry::File(_) = action_entry {
+                                FILE_DOES_NOT_EXIST.into()
+                            } else {
+                                FOLDER_DOES_NOT_EXIST.into()
+                            })
+                        }
                     };
                 }
             }
@@ -287,11 +327,11 @@ impl Vfs {
         let mut header = [0; 4];
         let header_size = self.file.read(&mut header)?;
 
-        let mut meta_len_bytes= [0; 8];
+        let mut meta_len_bytes = [0; 8];
         let meta_len_size = self.file.read(&mut meta_len_bytes)?;
         let meta_len = usize::from_ne_bytes(meta_len_bytes);
 
-        let mut meta_off_bytes= [0; 8];
+        let mut meta_off_bytes = [0; 8];
         let meta_off_size = self.file.read(&mut meta_off_bytes)?;
         let meta_off = u64::from_ne_bytes(meta_off_bytes);
 
@@ -315,7 +355,7 @@ impl Vfs {
         let decompressed = self.decoder.decompress_vec(new_buf.as_slice())?;
         let decrypted_buf = match self.oracle.decrypt(&nonce, decompressed.as_ref()) {
             Ok(v) => v,
-            Err(_) => return Err(ERROR_DURING_DEC.into())
+            Err(_) => return Err(ERROR_DURING_DEC.into()),
         };
 
         let mut aligned_vec = AlignedVec::new();
@@ -327,21 +367,16 @@ impl Vfs {
     }
 
     fn make_path(&self, path: String) -> Vec<String> {
-        normalize_path(
-            self.cur_directory
-                .join(path)
-                .as_path()
-            ).iter()
+        normalize_path(self.cur_directory.join(path).as_path())
+            .iter()
             .map(|part| part.to_str().unwrap().to_string())
             .collect()
     }
 
     fn encrypt(&mut self, buf: &[u8], nonce: [u8; 12]) -> Result<Vec<u8>, Box<dyn Error>> {
         match self.oracle.encrypt(&Nonce::from_slice(&nonce), buf) {
-            Ok(v) => {
-                self.compress(v.as_slice())
-            },
-            Err(_) => Err(ERROR_DURING_ENC.into())
+            Ok(v) => self.compress(v.as_slice()),
+            Err(_) => Err(ERROR_DURING_ENC.into()),
         }
     }
 
@@ -350,23 +385,31 @@ impl Vfs {
         Ok(compressed)
     }
 
-    fn read_encrypted(&mut self, length: usize, offset: u64, nonce: [u8; 12]) -> Result<Vec<u8>, Box<dyn Error>> {
+    fn read_encrypted(
+        &mut self,
+        length: usize,
+        offset: u64,
+        nonce: [u8; 12],
+    ) -> Result<Vec<u8>, Box<dyn Error>> {
         let new_buf = &mut vec![0; length];
         self.file.seek(SeekFrom::Start(offset + 20))?;
         self.file.read_exact(new_buf)?;
 
         let nonce = Nonce::from_slice(&nonce);
 
-        let decrypted_buf = match self.oracle.decrypt(&nonce, self.decoder.decompress_vec(new_buf.as_slice())?.as_ref()) {
+        let decrypted_buf = match self.oracle.decrypt(
+            &nonce,
+            self.decoder.decompress_vec(new_buf.as_slice())?.as_ref(),
+        ) {
             Ok(v) => v,
-            Err(_) => return Err(ERROR_DURING_DEC.into())
+            Err(_) => return Err(ERROR_DURING_DEC.into()),
         };
 
         Ok(decrypted_buf)
     }
 
     fn check_file(&mut self, file: VfsFile, path: String) -> Result<(), Box<dyn Error>> {
-        let buf = &mut vec!(0; file.length);
+        let buf = &mut vec![0; file.length];
 
         self.file.seek(SeekFrom::Start(file.offset as u64 + 20))?;
         self.file.read_exact(buf)?;
@@ -384,11 +427,11 @@ impl Vfs {
         for (name, entry) in dir.entries {
             let res = match entry {
                 VfsEntry::File(file) => self.check_file(file, [path.clone(), name].join("/")),
-                VfsEntry::Directory(dir) => self.check_dir(dir, [path.clone(), name].join("/"))
+                VfsEntry::Directory(dir) => self.check_dir(dir, [path.clone(), name].join("/")),
             };
 
             if let Err(err) = res {
-                return  Err(err);
+                return Err(err);
             }
         }
 
@@ -444,42 +487,34 @@ impl Vfs {
 
                 self.set_path(
                     path,
-                    Create(
-                        VfsEntry::File(
-                            VfsFile::new(
-                                offset,
-                                len,
-                                nonce,
-                                text.len(),
-                                date_time,
-                                checksum
-                            )
-                        )
-                    )
+                    Create(VfsEntry::File(VfsFile::new(
+                        offset,
+                        len,
+                        nonce,
+                        text.len(),
+                        date_time,
+                        checksum,
+                    ))),
                 )?;
 
                 if len < key {
                     self.root.free.insert(key - len, offset + len);
                 }
-            },
+            }
 
             None => {
                 let len = self.seek_write(enc.as_slice(), self.root.cur_offset as u64 + 20)?;
 
                 self.set_path(
                     path,
-                    Create(
-                        VfsEntry::File(
-                            VfsFile::new(
-                                self.root.cur_offset,
-                                len,
-                                nonce,
-                                text.len(),
-                                date_time,
-                                checksum
-                            )
-                        )
-                    )
+                    Create(VfsEntry::File(VfsFile::new(
+                        self.root.cur_offset,
+                        len,
+                        nonce,
+                        text.len(),
+                        date_time,
+                        checksum,
+                    ))),
                 )?;
 
                 self.root.cur_offset += len;
@@ -505,7 +540,7 @@ impl Vfs {
     pub fn cp(&mut self, from: String, to: String) -> Result<(), Box<dyn Error>> {
         let file = match self.get_path(from.clone())? {
             VfsEntry::File(file) => file,
-            VfsEntry::Directory(_) => return Err(format!("`{from}` is not a file.").into())
+            VfsEntry::Directory(_) => return Err(format!("`{from}` is not a file.").into()),
         };
 
         let buf = &mut vec![0; file.length];
@@ -515,23 +550,43 @@ impl Vfs {
 
         let date_time = datetime::now();
 
-        match self.root.free.iter().position(|(&len, _)| file.length <= len) {
+        match self
+            .root
+            .free
+            .iter()
+            .position(|(&len, _)| file.length <= len)
+        {
             Some(len) => {
                 let offset = self.root.free.remove(&len).unwrap();
                 self.seek_write(&buf.as_slice(), offset as u64 + 20)?;
 
-                self.set_path(to, Create(VfsEntry::File(VfsFile { offset, date_time, ..file }))
+                self.set_path(
+                    to,
+                    Create(VfsEntry::File(VfsFile {
+                        offset,
+                        date_time,
+                        ..file
+                    })),
                 )?;
 
                 if file.length < len {
-                    self.root.free.insert(len - file.length, offset + file.length);
+                    self.root
+                        .free
+                        .insert(len - file.length, offset + file.length);
                 }
-            },
+            }
 
             None => {
                 self.seek_write(buf.as_slice(), (self.root.cur_offset as u64) + 20)?;
 
-                self.set_path(to, Create(VfsEntry::File(VfsFile { offset: self.root.cur_offset, date_time, ..file })))?;
+                self.set_path(
+                    to,
+                    Create(VfsEntry::File(VfsFile {
+                        offset: self.root.cur_offset,
+                        date_time,
+                        ..file
+                    })),
+                )?;
 
                 self.root.cur_offset += file.offset;
             }
@@ -543,7 +598,9 @@ impl Vfs {
     pub fn mv(&mut self, from: String, to: String) -> Result<(), Box<dyn Error>> {
         let file = match self.get_path(from.clone())? {
             VfsEntry::File(file) => file,
-            VfsEntry::Directory(_) => return Err("`mv` for directories are not currently implemented".into())
+            VfsEntry::Directory(_) => {
+                return Err("`mv` for directories are not currently implemented".into())
+            }
         };
 
         self.set_path(from, Delete)?;
@@ -553,7 +610,13 @@ impl Vfs {
     pub fn rm(&mut self, path: String) -> Result<(), Box<dyn Error>> {
         let file = match self.get_path(path.clone())? {
             VfsEntry::File(file) => file,
-            VfsEntry::Directory(_) => return Err(format!("`{path}` is not a file.\n{}", "Use `rmdir` instead.".green()).into())
+            VfsEntry::Directory(_) => {
+                return Err(format!(
+                    "`{path}` is not a file.\n{}",
+                    "Use `rmdir` instead.".green()
+                )
+                .into())
+            }
         };
 
         let mut buf = vec![0; file.length];
@@ -565,32 +628,46 @@ impl Vfs {
     pub fn ls(&self) -> Result<(), Box<dyn Error>> {
         let directory = match self.get_path("./".to_string())? {
             VfsEntry::Directory(dir) => dir,
-            VfsEntry::File(_) => return Err(format!("Working directory is not a file").into())
+            VfsEntry::File(_) => return Err(format!("Working directory is not a file").into()),
         };
 
         let dir_name_max = match directory.entries.keys().map(String::len).max() {
             Some(max) if max > 4 => max,
-            _ => 4
+            _ => 4,
         };
 
         let width = 17;
-        let max = match directory.entries.values().map(|val| {
-            match val {
+        let max = match directory
+            .entries
+            .values()
+            .map(|val| match val {
                 VfsEntry::Directory(dir) => dir.entries.len(),
-                VfsEntry::File(f) => f.display_length
-            }
-        }).max() {
+                VfsEntry::File(f) => f.display_length,
+            })
+            .max()
+        {
             Some(m) if m > 9999 => m.to_string().len(),
-            _ => 4
+            _ => 4,
         };
 
-        println!("{:^dir_name_max$}   Type   {:^max$}   {:^width$}", "Name", "Size", "Date");
+        println!(
+            "{:^dir_name_max$}   Type   {:^max$}   {:^width$}",
+            "Name", "Size", "Date"
+        );
         println!("{0:-<dir_name_max$}   ----   {0:-<max$}   {0:-<width$}", "");
 
         for (path, entry) in &directory.entries {
             match entry {
-                VfsEntry::File(file) => println!("{path:dir_name_max$}   File   {:^max$}   {:^width$}", file.display_length, file.date_time.parse_dt()),
-                VfsEntry::Directory(dir) => println!("{path:dir_name_max$}   Dir    {:^max$}   {:^width$}", dir.entries.len(), dir.date_time.parse_dt())
+                VfsEntry::File(file) => println!(
+                    "{path:dir_name_max$}   File   {:^max$}   {:^width$}",
+                    file.display_length,
+                    file.date_time.parse_dt()
+                ),
+                VfsEntry::Directory(dir) => println!(
+                    "{path:dir_name_max$}   Dir    {:^max$}   {:^width$}",
+                    dir.entries.len(),
+                    dir.date_time.parse_dt()
+                ),
             }
         }
 
@@ -617,7 +694,13 @@ impl Vfs {
     }
 
     pub fn mkdir(&mut self, path: String) -> Result<(), Box<dyn Error>> {
-        self.set_path(path, Create(VfsEntry::Directory(VfsDirectory::new(BTreeMap::new(), datetime::now()))))
+        self.set_path(
+            path,
+            Create(VfsEntry::Directory(VfsDirectory::new(
+                BTreeMap::new(),
+                datetime::now(),
+            ))),
+        )
     }
 
     pub fn pwd(&self) -> Result<(), Box<dyn Error>> {
@@ -626,14 +709,16 @@ impl Vfs {
 
     pub fn rmdir(&mut self, path: String) -> Result<(), Box<dyn Error>> {
         let dir = match self.get_path(path.clone())? {
-            VfsEntry::File(_) => return Err(format!("`{path}` is not a directory. use `rm` instead.").into()),
-            VfsEntry::Directory(dir) => dir
+            VfsEntry::File(_) => {
+                return Err(format!("`{path}` is not a directory. use `rm` instead.").into())
+            }
+            VfsEntry::Directory(dir) => dir,
         };
 
         for (name, entry) in dir.entries {
             match entry {
                 VfsEntry::File(_) => self.rm(vec![path.clone(), name].join("/"))?,
-                VfsEntry::Directory(_) => self.rmdir(vec![path.clone(), name].join("/"))?
+                VfsEntry::Directory(_) => self.rmdir(vec![path.clone(), name].join("/"))?,
             }
         }
 
@@ -641,7 +726,6 @@ impl Vfs {
     }
 
     pub fn import(&mut self, from: String, to: String) -> Result<(), Box<dyn Error>> {
-
         let mut file = File::open(from)?;
         let text = &mut Vec::new();
         file.read_to_end(text)?;
@@ -661,31 +745,34 @@ impl Vfs {
 
                 self.set_path(
                     to,
-                    Create(VfsEntry::File(VfsFile::new(offset, len, nonce, text.len(), date_time, checksum)))
+                    Create(VfsEntry::File(VfsFile::new(
+                        offset,
+                        len,
+                        nonce,
+                        text.len(),
+                        date_time,
+                        checksum,
+                    ))),
                 )?;
 
                 if len < key {
                     self.root.free.insert(key - len, offset + len);
                 }
-            },
+            }
 
             None => {
                 let len = self.seek_write(enc.as_slice(), self.root.cur_offset as u64 + 20)?;
 
                 self.set_path(
                     to,
-                    Create(
-                        VfsEntry::File(
-                            VfsFile::new(
-                                self.root.cur_offset,
-                                len,
-                                nonce,
-                                text.len(),
-                                date_time,
-                                checksum
-                            )
-                        )
-                    )
+                    Create(VfsEntry::File(VfsFile::new(
+                        self.root.cur_offset,
+                        len,
+                        nonce,
+                        text.len(),
+                        date_time,
+                        checksum,
+                    ))),
                 )?;
 
                 self.root.cur_offset += len;
@@ -699,7 +786,8 @@ impl Vfs {
         let entry = self.get_path(from.clone())?;
 
         if let VfsEntry::File(vfs_file) = entry {
-            let buf = self.read_encrypted(vfs_file.length, vfs_file.offset as u64, vfs_file.nonce)?;
+            let buf =
+                self.read_encrypted(vfs_file.length, vfs_file.offset as u64, vfs_file.nonce)?;
 
             let mut file = File::create(to)?;
             file.write_all(&buf)?;
@@ -713,7 +801,7 @@ impl Vfs {
     pub fn nano(&mut self, path: String) -> Result<(), Box<dyn Error>> {
         let file = match self.get_path(path.clone())? {
             VfsEntry::File(file) => file,
-            VfsEntry::Directory(_) => return Err(format!("`{path}` is not a file.").into())
+            VfsEntry::Directory(_) => return Err(format!("`{path}` is not a file.").into()),
         };
 
         let mut text = String::new();
@@ -742,20 +830,38 @@ impl Vfs {
             Ordering::Equal => {
                 self.seek_write(enc.as_slice(), file.offset as u64 + 20)?;
 
-                self.set_path(path, Update(VfsEntry::File(VfsFile { nonce, date_time, checksum, ..file })))
-            },
+                self.set_path(
+                    path,
+                    Update(VfsEntry::File(VfsFile {
+                        nonce,
+                        date_time,
+                        checksum,
+                        ..file
+                    })),
+                )
+            }
 
             Ordering::Less => {
                 self.seek_write(enc.as_slice(), file.offset as u64 + 20)?;
 
-                self.set_path(path, Update(VfsEntry::File(VfsFile::new(file.offset, len, nonce, text.len(), date_time, checksum))))?;
+                self.set_path(
+                    path,
+                    Update(VfsEntry::File(VfsFile::new(
+                        file.offset,
+                        len,
+                        nonce,
+                        text.len(),
+                        date_time,
+                        checksum,
+                    ))),
+                )?;
 
                 let mut buf = vec![0; file.length - len];
                 self.seek_write(&mut buf, file.offset as u64 - len as u64 + 20)?;
 
                 self.root.free.insert(len - file.length, len);
                 OK
-            },
+            }
 
             Ordering::Greater => {
                 self.root.free.insert(file.length, file.offset);
@@ -766,25 +872,24 @@ impl Vfs {
 
                 self.set_path(
                     path,
-                    Update(
-                        VfsEntry::File(
-                            VfsFile::new(
-                                self.root.cur_offset,
-                                len,
-                                nonce,
-                                text.len(),
-                                date_time,
-                                checksum
-                            )
-                        )
-                    )
+                    Update(VfsEntry::File(VfsFile::new(
+                        self.root.cur_offset,
+                        len,
+                        nonce,
+                        text.len(),
+                        date_time,
+                        checksum,
+                    ))),
                 )
             }
         }
     }
 
     pub fn help() -> Result<(), Box<dyn Error>> {
-        Ok(println!("{}", format!(r#"Very Fast and Secure file system.
+        Ok(println!(
+            "{}",
+            format!(
+                r#"Very Fast and Secure file system.
 Version: {}
 By: Blood Rogue (github.com/blood-rogue)
 
@@ -866,7 +971,12 @@ Commands:
 		description: Defragments the Vfs and removes the free areas in between.
         note: Currently this feature is not yet implemented.
               Expected to be implemented by v3.2.0
-"#, env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")).green()))
+"#,
+                env!("CARGO_PKG_NAME"),
+                env!("CARGO_PKG_VERSION")
+            )
+            .green()
+        ))
     }
 
     pub fn check(&mut self) -> Result<(), Box<dyn Error>> {

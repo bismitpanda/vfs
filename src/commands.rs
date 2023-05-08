@@ -41,7 +41,7 @@ impl From<&str> for Commands {
             "defrag" | "dfrg" => Commands::DEFRAG,
             "help" | "hlp" | "h" => Commands::HELP,
             "check" => Commands::CHECK,
-            _ => Commands::INVALID
+            _ => Commands::INVALID,
         }
     }
 }
