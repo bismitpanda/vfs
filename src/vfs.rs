@@ -4,11 +4,11 @@ use crate::datetime::ToDateTime;
 use std::{
     cmp::Ordering,
     collections::{
-        btree_map::Entry::{Occupied, Vacant},
-        BTreeMap,
+        hash_map::Entry::{Occupied, Vacant},
+        BTreeMap, HashMap,
     },
     error::Error,
-    fs::{File, OpenOptions},
+    fs::{File as StdFile, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
 };
@@ -22,10 +22,8 @@ use rkyv::{AlignedVec, Archive, Deserialize, Serialize};
 
 use bytecheck::CheckBytes;
 use colored::*;
-use generic_array::GenericArray;
 use sha2::{Digest, Sha256};
 use snap::raw::{Decoder, Encoder};
-use typenum::U32;
 
 #[macro_export]
 macro_rules! scan {
@@ -45,15 +43,21 @@ macro_rules! scan {
     }};
 }
 
-#[derive(Archive, Serialize, Deserialize, Clone)]
-#[archive_attr(derive(CheckBytes))]
+#[derive(Archive, Serialize, Deserialize, Clone, Copy)]
+#[archive(check_bytes)]
 struct VfsFile {
     offset: usize,
     length: usize,
     display_length: usize,
     date_time: u32,
     nonce: [u8; 12],
-    checksum: Vec<u8>,
+}
+
+#[derive(Archive, Serialize, Deserialize, Clone)]
+#[archive(check_bytes)]
+struct VfsDirectory {
+    date_time: u32,
+    entries: HashMap<String, usize>,
 }
 
 #[derive(Archive, Serialize, Deserialize, Clone)]
@@ -63,45 +67,19 @@ enum VfsEntry {
     Directory(VfsDirectory),
 }
 
-#[derive(Archive, Serialize, Deserialize, Clone)]
-#[archive(bound(serialize = "__S: rkyv::ser::ScratchSpace + rkyv::ser::Serializer"))]
-#[archive_attr(
-    derive(CheckBytes),
-    check_bytes(
-        bound = "__C: rkyv::validation::ArchiveContext, <__C as rkyv::Fallible>::Error: std::error::Error"
-    )
-)]
-struct VfsDirectory {
-    date_time: u32,
-    #[omit_bounds]
-    #[archive_attr(omit_bounds)]
-    entries: BTreeMap<String, VfsEntry>,
-}
-
-#[derive(Archive, Serialize, Deserialize)]
-#[archive(bound(serialize = "__S: rkyv::ser::ScratchSpace + rkyv::ser::Serializer"))]
-#[archive_attr(
-    derive(CheckBytes),
-    check_bytes(
-        bound = "__C: rkyv::validation::ArchiveContext, <__C as rkyv::Fallible>::Error: std::error::Error"
-    )
-)]
-struct Root {
-    cur_offset: usize,
-    #[omit_bounds]
-    #[archive_attr(omit_bounds)]
-    entries: BTreeMap<String, VfsEntry>,
-    free: BTreeMap<usize, usize>,
+pub struct EntryTable {
+    entries: HashMap<usize, VfsEntry>,
 }
 
 pub struct Vfs {
     oracle: Aes256Gcm,
     encoder: Encoder,
     decoder: Decoder,
-    hasher: Sha256,
-    root: Root,
-    file: File,
-    pub cur_directory: PathBuf,
+    cur_offset: usize,
+    table: EntryTable,
+    free: BTreeMap<usize, usize>,
+    file: StdFile,
+    cur_directory: PathBuf,
 }
 
 impl VfsFile {
@@ -111,7 +89,6 @@ impl VfsFile {
         nonce: [u8; 12],
         display_length: usize,
         date_time: u32,
-        checksum: Vec<u8>,
     ) -> Self {
         Self {
             offset,
@@ -119,39 +96,27 @@ impl VfsFile {
             display_length,
             nonce,
             date_time,
-            checksum,
         }
     }
 }
 
 impl VfsDirectory {
-    fn new(entries: BTreeMap<String, VfsEntry>, date_time: u32) -> Self {
+    fn new(entries: HashMap<String, usize>, date_time: u32) -> Self {
         Self { entries, date_time }
     }
+}
 
+impl Default for VfsDirectory {
     fn default() -> Self {
-        Self::new(BTreeMap::new(), 0)
+        Self::new(HashMap::new(), 0)
     }
 }
 
-impl Default for Root {
-    fn default() -> Self {
-        Root {
-            cur_offset: 0,
-            entries: BTreeMap::from([(
-                r"\".to_string(),
-                VfsEntry::Directory(VfsDirectory::default()),
-            )]),
-            free: BTreeMap::new(),
-        }
-    }
-}
-
-fn get_key(prompt: &str) -> GenericArray<u8, U32> {
+fn get_key(prompt: &str) -> Vec<u8> {
     let key = rpassword::prompt_password(prompt).unwrap();
     let cipher_key = Sha256::digest(key.as_bytes());
 
-    return cipher_key;
+    cipher_key.as_slice().to_vec()
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -202,11 +167,15 @@ impl Vfs {
             .open(path.clone())
             .unwrap();
 
-        let cipher = Aes256Gcm::new(&get_key(if exists {
-            "Your key"
-        } else {
-            "Enter a new key: "
-        }));
+        let cipher = Aes256Gcm::new(
+            get_key(if exists {
+                "Your key: "
+            } else {
+                "Enter a new key: "
+            })
+            .as_slice()
+            .into(),
+        );
 
         if !exists {
             file.write_all(b"vfs\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0")
@@ -217,19 +186,36 @@ impl Vfs {
 
         Vfs {
             oracle: cipher,
-            root: Root::default(),
             encoder: Encoder::new(),
             decoder: Decoder::new(),
-            hasher: Sha256::new(),
             cur_directory: Path::new(r"\").join(""),
+            table: EntryTable {
+                entries: HashMap::from([]),
+            },
             file,
+            cur_offset: 0,
+            free: BTreeMap::new(),
+        }
+    }
+
+    pub fn root(&self) -> Result<VfsDirectory, Box<dyn Error>> {
+        let Some(entry) = self.table.entries.get(&0).cloned() else {
+            return Err("root not found".into());
+        };
+
+        match entry {
+            VfsEntry::Directory(dir) => Ok(dir),
+            VfsEntry::File(_) => Err("root is not a folder".into()),
         }
     }
 
     fn get_path(&self, cur_path: String) -> Result<VfsEntry, Box<dyn Error>> {
         let binding = self.make_path(cur_path);
         let mut path = binding.iter();
-        let mut entry = self.root.entries[path.next().unwrap()].clone();
+        let entry_id = self.root()?.entries[path.next().unwrap()].clone();
+
+        let entry = self.table.entries.get_mut(&entry_id).unwrap();
+
         for part in path {
             match entry {
                 VfsEntry::Directory(dir) => {
@@ -243,13 +229,13 @@ impl Vfs {
             }
         }
 
-        Ok(entry)
+        Ok(*entry)
     }
 
     fn set_path(&mut self, cur_path: String, action: Action) -> Result<(), Box<dyn Error>> {
         let path = self.make_path(cur_path);
         let mut entry = self
-            .root
+            .root()?
             .entries
             .entry(path[0].clone())
             .or_insert(VfsEntry::Directory(VfsDirectory::default()));
@@ -408,36 +394,6 @@ impl Vfs {
         Ok(decrypted_buf)
     }
 
-    fn check_file(&mut self, file: VfsFile, path: String) -> Result<(), Box<dyn Error>> {
-        let buf = &mut vec![0; file.length];
-
-        self.file.seek(SeekFrom::Start(file.offset as u64 + 20))?;
-        self.file.read_exact(buf)?;
-
-        self.hasher.update(buf.as_slice());
-
-        if file.checksum != self.hasher.finalize_reset().to_vec() {
-            return Err(format!("{}: checksum doesn't match", path).into());
-        }
-
-        OK
-    }
-
-    fn check_dir(&mut self, dir: VfsDirectory, path: String) -> Result<(), Box<dyn Error>> {
-        for (name, entry) in dir.entries {
-            let res = match entry {
-                VfsEntry::File(file) => self.check_file(file, [path.clone(), name].join("/")),
-                VfsEntry::Directory(dir) => self.check_dir(dir, [path.clone(), name].join("/")),
-            };
-
-            if let Err(err) = res {
-                return Err(err);
-            }
-        }
-
-        OK
-    }
-
     fn seek_write(&mut self, buf: &[u8], offset: u64) -> Result<usize, Box<dyn Error>> {
         self.file.seek(SeekFrom::Start(offset))?;
         self.file.write_all(buf)?;
@@ -449,12 +405,12 @@ impl Vfs {
     pub fn exit(&mut self) -> Result<(), Box<dyn Error>> {
         let bytes = rkyv::to_bytes::<_, 2048>(&self.root)?;
         let enc_bytes = self.encrypt(bytes.as_slice(), *b"secure nonce")?;
-        let len = self.seek_write(&enc_bytes, self.root.cur_offset as u64 + 20)?;
+        let len = self.seek_write(&enc_bytes, self.cur_offset as u64 + 20)?;
 
         self.file.seek(SeekFrom::Start(0))?;
         self.file.write_all(b"vfs\0")?;
         self.file.write_all(&len.to_ne_bytes())?;
-        self.file.write_all(&self.root.cur_offset.to_ne_bytes())?;
+        self.file.write_all(&self.cur_offset.to_ne_bytes())?;
 
         OK
     }
@@ -477,9 +433,6 @@ impl Vfs {
         let enc = self.encrypt(text.as_bytes(), nonce)?;
         let date_time = datetime::now();
 
-        self.hasher.update(&enc);
-        let checksum = self.hasher.finalize_reset().to_vec();
-
         match self.root.free.iter().position(|(&len, _)| enc.len() <= len) {
             Some(key) => {
                 let offset = self.root.free.remove(&key).unwrap();
@@ -493,7 +446,6 @@ impl Vfs {
                         nonce,
                         text.len(),
                         date_time,
-                        checksum,
                     ))),
                 )?;
 
@@ -503,21 +455,20 @@ impl Vfs {
             }
 
             None => {
-                let len = self.seek_write(enc.as_slice(), self.root.cur_offset as u64 + 20)?;
+                let len = self.seek_write(enc.as_slice(), self.cur_offset as u64 + 20)?;
 
                 self.set_path(
                     path,
                     Create(VfsEntry::File(VfsFile::new(
-                        self.root.cur_offset,
+                        self.cur_offset,
                         len,
                         nonce,
                         text.len(),
                         date_time,
-                        checksum,
                     ))),
                 )?;
 
-                self.root.cur_offset += len;
+                self.cur_offset += len;
             }
         };
 
@@ -577,18 +528,18 @@ impl Vfs {
             }
 
             None => {
-                self.seek_write(buf.as_slice(), (self.root.cur_offset as u64) + 20)?;
+                self.seek_write(buf.as_slice(), (self.cur_offset as u64) + 20)?;
 
                 self.set_path(
                     to,
                     Create(VfsEntry::File(VfsFile {
-                        offset: self.root.cur_offset,
+                        offset: self.cur_offset,
                         date_time,
                         ..file
                     })),
                 )?;
 
-                self.root.cur_offset += file.offset;
+                self.cur_offset += file.offset;
             }
         }
 
@@ -735,9 +686,6 @@ impl Vfs {
         let enc = self.encrypt(text.as_slice(), nonce)?;
         let date_time = datetime::now();
 
-        self.hasher.update(enc.as_slice());
-        let checksum = self.hasher.finalize_reset().to_vec();
-
         match self.root.free.iter().position(|(&len, _)| enc.len() <= len) {
             Some(key) => {
                 let offset = self.root.free.remove(&key).unwrap();
@@ -751,7 +699,6 @@ impl Vfs {
                         nonce,
                         text.len(),
                         date_time,
-                        checksum,
                     ))),
                 )?;
 
@@ -761,21 +708,20 @@ impl Vfs {
             }
 
             None => {
-                let len = self.seek_write(enc.as_slice(), self.root.cur_offset as u64 + 20)?;
+                let len = self.seek_write(enc.as_slice(), self.cur_offset as u64 + 20)?;
 
                 self.set_path(
                     to,
                     Create(VfsEntry::File(VfsFile::new(
-                        self.root.cur_offset,
+                        self.cur_offset,
                         len,
                         nonce,
                         text.len(),
                         date_time,
-                        checksum,
                     ))),
                 )?;
 
-                self.root.cur_offset += len;
+                self.cur_offset += len;
             }
         };
 
@@ -823,9 +769,6 @@ impl Vfs {
 
         let len = enc.len();
 
-        self.hasher.update(&enc);
-        let checksum = self.hasher.finalize_reset().to_vec();
-
         match len.cmp(&file.length) {
             Ordering::Equal => {
                 self.seek_write(enc.as_slice(), file.offset as u64 + 20)?;
@@ -835,7 +778,6 @@ impl Vfs {
                     Update(VfsEntry::File(VfsFile {
                         nonce,
                         date_time,
-                        checksum,
                         ..file
                     })),
                 )
@@ -852,7 +794,6 @@ impl Vfs {
                         nonce,
                         text.len(),
                         date_time,
-                        checksum,
                     ))),
                 )?;
 
@@ -867,18 +808,17 @@ impl Vfs {
                 self.root.free.insert(file.length, file.offset);
                 self.seek_write(vec![0; file.length].as_slice(), file.offset as u64 + 20)?;
 
-                self.seek_write(enc.as_slice(), self.root.cur_offset as u64 + 20)?;
-                self.root.cur_offset += len;
+                self.seek_write(enc.as_slice(), self.cur_offset as u64 + 20)?;
+                self.cur_offset += len;
 
                 self.set_path(
                     path,
                     Update(VfsEntry::File(VfsFile::new(
-                        self.root.cur_offset,
+                        self.cur_offset,
                         len,
                         nonce,
                         text.len(),
                         date_time,
-                        checksum,
                     ))),
                 )
             }
@@ -886,10 +826,8 @@ impl Vfs {
     }
 
     pub fn help() -> Result<(), Box<dyn Error>> {
-        Ok(println!(
-            "{}",
-            format!(
-                r#"Very Fast and Secure file system.
+        let help = format!(
+            r#"Very Fast and Secure file system.
 Version: {}
 By: Blood Rogue (github.com/blood-rogue)
 
@@ -972,22 +910,10 @@ Commands:
         note: Currently this feature is not yet implemented.
               Expected to be implemented by v3.2.0
 "#,
-                env!("CARGO_PKG_NAME"),
-                env!("CARGO_PKG_VERSION")
-            )
-            .green()
-        ))
-    }
-
-    pub fn check(&mut self) -> Result<(), Box<dyn Error>> {
-        let dir = match self.get_path("".to_string()) {
-            Ok(p) => match p {
-                VfsEntry::File(_) => return Err("Current directory is a file which should not be possible.\n\tPlease raise an issue at github.com/blood-rogue/vfs/issues".into()),
-                VfsEntry::Directory(dir) => dir
-            },
-            Err(err) => return Err(format!("Error while getting working directory: {}", err).into())
-        };
-
-        self.check_dir(dir, self.make_path("".to_string()).join("/"))
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION")
+        )
+        .green();
+        Ok(println!("{}", help))
     }
 }

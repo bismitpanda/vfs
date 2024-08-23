@@ -25,7 +25,6 @@ fn main() {
             Commands::LS => vfs.ls(),
             Commands::PWD => vfs.pwd(),
             Commands::HELP => Vfs::help(),
-            Commands::CHECK => vfs.check(),
             Commands::EXIT => break vfs.exit(),
             Commands::RESET => break vfs.reset(),
             Commands::DEFRAG => Err("Not implemented".into()),
